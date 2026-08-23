@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.db
+data/
+apps/web/.next/
+apps/web/node_modules/
+apps/web/.env.local
+

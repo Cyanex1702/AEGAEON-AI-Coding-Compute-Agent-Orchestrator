@@ -1,0 +1,39 @@
+services:
+  controller:
+    build:
+      context: .
+      dockerfile: apps/controller/Dockerfile
+    environment:
+      AEGAEON_HOST: 0.0.0.0
+      AEGAEON_DATABASE_URL: sqlite:////data/aegaeon.db
+      AEGAEON_DATA_DIR: /data
+      AEGAEON_WORKER_TOKEN: ${AEGAEON_WORKER_TOKEN:-development-token}
+      AEGAEON_DEMO_MODE: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - aegaeon-data:/data
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/controller/Dockerfile
+    command: ["python", "-m", "worker.worker", "--controller", "ws://controller:8000/ws/worker", "--token", "${AEGAEON_WORKER_TOKEN:-development-token}"]
+    depends_on:
+      - controller
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_AEGAEON_API_URL: http://127.0.0.1:8000
+        NEXT_PUBLIC_AEGAEON_WS_URL: ws://127.0.0.1:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - controller
+
+volumes:
+  aegaeon-data:
+

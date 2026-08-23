@@ -1,0 +1,16 @@
+
+> @aegaeon/web@0.1.0 dev
+> next dev --hostname 127.0.0.1
+
+▲ Next.js 16.3.1 (Turbopack)
+- Local:         http://127.0.0.1:3000
+- Network:       http://127.0.0.1:3000
+✓ Ready in 1148ms
+✓ Running next.config.ts took 258ms
+
+ GET / 200 in 682ms (next.js: 370ms, application-code: 313ms)
+ GET / 200 in 67ms (next.js: 4ms, application-code: 63ms)
+ GET / 200 in 42ms (next.js: 16ms, application-code: 26ms)
+✓ Compiled in 1509ms
+✓ Compiled in 35ms
+ GET / 200 in 33ms (next.js: 12ms, application-code: 21ms)

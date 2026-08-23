@@ -1,0 +1,12 @@
+INFO:     Started server process [12532]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:64750 - "WebSocket /ws/worker?token=development-token" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:64779 - "WebSocket /ws/ui" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:64786 - "WebSocket /ws/ui" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:49622 - "WebSocket /ws/ui" [accepted]
+INFO:     connection open

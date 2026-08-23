@@ -1,0 +1,8 @@
+
+> aegaeon@0.1.0 dev
+> npm --prefix apps/web run dev --hostname 127.0.0.1
+
+
+> @aegaeon/web@0.1.0 dev
+> next dev 127.0.0.1
+

@@ -1,0 +1,1 @@
+"""Disposable AEGAEON worker process."""
