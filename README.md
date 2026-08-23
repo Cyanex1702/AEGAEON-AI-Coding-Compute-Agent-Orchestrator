@@ -196,5 +196,4 @@ Never commit real API keys or worker tokens. The checked-in `.env.example` conta
 
 The ten-phase MVP and the Rich Boy/Broke Boy continuation milestone are complete. The next post-MVP milestone is Docker-backed execution and stronger workload isolation, followed by PostgreSQL/object-storage adapters. See [Multiple-worker execution](docs/MULTI_WORKER.md) for Phase 10 operations and recovery behavior.
 
-#   A E G A E O N - A I - C o d i n g - C o m p u t e - A g e n t - O r c h e s t r a t o r -  
- 
+#
