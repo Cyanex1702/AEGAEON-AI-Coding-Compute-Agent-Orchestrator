@@ -1,19 +1,21 @@
 "use client";
 
 import {
+  BrainCircuit,
   Boxes,
   ChevronRight,
   Cpu,
   FolderKanban,
   LayoutDashboard,
   Network,
+  Pin,
   Plus,
   Settings2,
 } from "lucide-react";
 import type { Project, Worker } from "@/lib/types";
 import { cn, StatusDot } from "./ui";
 
-export type AppView = "dashboard" | "project" | "workers" | "models" | "settings";
+export type AppView = "dashboard" | "project" | "workers" | "compute" | "models" | "settings";
 
 type Props = {
   view: AppView;
@@ -37,6 +39,7 @@ export function Sidebar({
   const navigation = [
     { id: "dashboard" as const, label: "Overview", icon: LayoutDashboard },
     { id: "workers" as const, label: "Compute workers", icon: Cpu },
+    { id: "compute" as const, label: "Compute intelligence", icon: BrainCircuit },
     { id: "models" as const, label: "Model registry", icon: Boxes },
   ];
   return (
@@ -100,7 +103,7 @@ export function Sidebar({
                   status={project.status}
                   pulse={["running", "testing", "reviewing", "planning"].includes(project.status)}
                 />
-                <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                <span className="min-w-0 flex-1 truncate">{project.name}</span>{project.is_pinned && <Pin className="h-3 w-3 text-acid" />}
                 <ChevronRight className="h-3 w-3 text-zinc-700" />
               </button>
             ))

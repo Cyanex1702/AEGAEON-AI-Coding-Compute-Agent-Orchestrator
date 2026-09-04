@@ -19,14 +19,30 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/aegaeon.db"
     data_dir: Path = Path("./data")
     worker_token: str = Field(default="development-token", min_length=8)
+    allow_development_worker_token: bool = False
+    control_token: str = ""
+    trusted_proxy_ips: list[str] = Field(default_factory=list)
+    ui_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
+    )
     demo_mode: bool = True
-    heartbeat_timeout_seconds: int = Field(default=20, ge=5)
+    allow_unisolated_verification: bool = False
+    heartbeat_timeout_seconds: int = Field(default=120, ge=5, le=600)
+    websocket_ping_interval_seconds: int = Field(default=30, ge=5, le=300)
+    websocket_ping_timeout_seconds: int = Field(default=180, ge=30, le=900)
     max_retries: int = Field(default=3, ge=0, le=10)
     command_timeout_seconds: int = Field(default=120, ge=1, le=1800)
     maximum_output_bytes: int = Field(default=200_000, ge=1_000)
-    job_lease_seconds: int = Field(default=30, ge=10, le=600)
+    job_lease_seconds: int = Field(default=180, ge=10, le=900)
     job_assignment_timeout_seconds: int = Field(default=180, ge=10, le=1800)
     pairing_code_lifetime_seconds: int = Field(default=1800, ge=60, le=86_400)
+    worker_credential_lifetime_seconds: int = Field(default=43_200, ge=600, le=604_800)
+    remote_probe_interval_seconds: int = Field(default=20, ge=5, le=300)
+    remote_failure_threshold: int = Field(default=4, ge=2, le=20)
+    remote_recovery_attempts: int = Field(default=6, ge=1, le=20)
     hf_token: str = ""
     llm_base_url: str = "http://localhost:11434/v1"
     llm_api_key: str = ""

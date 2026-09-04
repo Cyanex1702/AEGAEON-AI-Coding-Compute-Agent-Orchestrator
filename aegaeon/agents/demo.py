@@ -99,6 +99,57 @@ def test_message() -> None:
     assert client.post("/message", json={"text": "hello"}).json() == {"message": "hello"}
 """
 
+CALCULATOR_STORAGE = """from dataclasses import dataclass, field
+
+
+@dataclass
+class CalculatorState:
+    memory: float = 0.0
+    history: list[str] = field(default_factory=list)
+"""
+
+GENERIC_STORAGE = """from dataclasses import dataclass, field
+
+
+@dataclass
+class ApplicationState:
+    events: list[str] = field(default_factory=list)
+"""
+
+CALCULATOR_SCIENTIFIC = """import math
+
+
+def scientific(function: str, value: float, *, degrees: bool = False) -> float:
+    angle = math.radians(value) if degrees and function in {"sin", "cos", "tan"} else value
+    operations = {
+        "sin": math.sin,
+        "cos": math.cos,
+        "tan": math.tan,
+        "log": math.log10,
+        "ln": math.log,
+        "sqrt": math.sqrt,
+    }
+    if function not in operations:
+        raise ValueError(f"Unsupported scientific function: {function}")
+    return operations[function](angle)
+"""
+
+CALCULATOR_UI = """<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AEGAEON Scientific Calculator</title>
+<main><h1>Scientific Calculator</h1><p>API and keyboard-ready UI foundation.</p></main>
+"""
+
+GENERIC_UI = """<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AEGAEON Application</title>
+<main><h1>AEGAEON Application</h1></main>
+"""
+
 
 class DemoAgentRuntime:
     """Deterministic portfolio-safe runtime used when no model endpoint is configured."""
@@ -159,7 +210,16 @@ class DemoAgentRuntime:
 
     def generate(self, prompt: str, stage: str) -> dict[str, str]:
         calculator = self._calculator(prompt)
-        if stage in {"implementation", "fix"}:
+        if stage == "foundation":
+            return {
+                "app/__init__.py": "",
+                "requirements.txt": "fastapi>=0.115\nuvicorn>=0.34\npytest>=8.3\nhttpx>=0.28\n",
+                "pyproject.toml": (
+                    '[tool.pytest.ini_options]\npythonpath = ["."]\ntestpaths = ["tests"]\n'
+                ),
+                "README.md": self._readme(calculator),
+            }
+        if stage == "implementation":
             return {
                 "app/__init__.py": "",
                 "app/main.py": CALCULATOR_MAIN if calculator else GENERIC_MAIN,
@@ -168,6 +228,29 @@ class DemoAgentRuntime:
                     '[tool.pytest.ini_options]\npythonpath = ["."]\ntestpaths = ["tests"]\n'
                 ),
                 "README.md": self._readme(calculator),
+            }
+        if stage in {"core-implementation", "backend-domain", "fix"}:
+            return {"app/main.py": CALCULATOR_MAIN if calculator else GENERIC_MAIN}
+        if stage == "persistence-integration":
+            return {
+                "app/storage.py": CALCULATOR_STORAGE if calculator else GENERIC_STORAGE,
+            }
+        if stage == "frontend-experience":
+            return {"app/static/index.html": CALCULATOR_UI if calculator else GENERIC_UI}
+        if stage == "advanced-integration":
+            return {
+                "app/scientific.py": (
+                    CALCULATOR_SCIENTIFIC
+                    if calculator
+                    else 'def capability_status() -> str:\n    return "ready"\n'
+                )
+            }
+        if stage.endswith("-companion"):
+            return {
+                f"generated/{stage}.md": (
+                    f"# {stage.replace('-', ' ').title()}\n\n"
+                    "Deterministic companion scope completed by the demo runtime.\n"
+                )
             }
         if stage == "tests":
             return {

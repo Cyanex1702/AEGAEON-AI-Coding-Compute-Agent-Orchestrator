@@ -16,9 +16,15 @@ class PairingError(ValueError):
 
 
 class WorkerPairingService:
-    def __init__(self, database: Database, lifetime_seconds: int = 1800) -> None:
+    def __init__(
+        self,
+        database: Database,
+        lifetime_seconds: int = 1800,
+        credential_lifetime_seconds: int = 43_200,
+    ) -> None:
         self.database = database
         self.lifetime_seconds = lifetime_seconds
+        self.credential_lifetime_seconds = credential_lifetime_seconds
 
     @staticmethod
     def _digest(value: str) -> str:
@@ -60,7 +66,7 @@ class WorkerPairingService:
             if record.redeemed_at is not None:
                 raise PairingError("Pairing code was already used")
             token = secrets.token_urlsafe(32)
-            credential_expires = now + timedelta(hours=12)
+            credential_expires = now + timedelta(seconds=self.credential_lifetime_seconds)
             record.redeemed_at = now
             record.credential_hash = self._digest(token)
             record.credential_expires_at = credential_expires
@@ -68,6 +74,10 @@ class WorkerPairingService:
             return token, worker_id, record.model_id, credential_expires
 
     def identity(self, token: str) -> tuple[str, str] | None:
+        context = self.identity_context(token)
+        return (context[0], context[1]) if context else None
+
+    def identity_context(self, token: str) -> tuple[str, str, str] | None:
         if not token:
             return None
         now = datetime.now(UTC)
@@ -85,7 +95,11 @@ class WorkerPairingService:
                 expires = expires.replace(tzinfo=UTC)
             if expires <= now:
                 return None
-            return f"{record.worker_name}-{record.id[-6:]}", record.model_id
+            return (
+                f"{record.worker_name}-{record.id[-6:]}",
+                record.model_id,
+                record.project_id,
+            )
 
     def revoke_worker(self, worker_id: str) -> bool:
         now = datetime.now(UTC)

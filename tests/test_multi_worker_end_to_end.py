@@ -159,15 +159,23 @@ def test_independent_tasks_dispatch_to_two_workers_concurrently(tmp_path) -> Non
         database_url=f"sqlite:///{tmp_path / 'parallel.db'}",
         data_dir=tmp_path / "data",
         worker_token="parallel-worker-token",
+        allow_development_worker_token=True,
         demo_mode=False,
+        allow_unisolated_verification=True,
         command_timeout_seconds=30,
         job_assignment_timeout_seconds=30,
     )
     app = create_app(settings, model_runtime=ParallelModelRuntime())
     with TestClient(app) as client:
         with (
-            client.websocket_connect("/ws/worker?token=parallel-worker-token") as first,
-            client.websocket_connect("/ws/worker?token=parallel-worker-token") as second,
+            client.websocket_connect(
+                "/ws/worker",
+                headers={"x-aegaeon-worker-token": "parallel-worker-token"},
+            ) as first,
+            client.websocket_connect(
+                "/ws/worker",
+                headers={"x-aegaeon-worker-token": "parallel-worker-token"},
+            ) as second,
         ):
             register_worker(first, "worker-one")
             register_worker(second, "worker-two")

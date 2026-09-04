@@ -7,33 +7,62 @@ services:
       AEGAEON_HOST: 0.0.0.0
       AEGAEON_DATABASE_URL: sqlite:////data/aegaeon.db
       AEGAEON_DATA_DIR: /data
-      AEGAEON_WORKER_TOKEN: ${AEGAEON_WORKER_TOKEN:-development-token}
+      AEGAEON_WORKER_TOKEN: ${AEGAEON_WORKER_TOKEN:?set a strong worker token}
+      AEGAEON_ALLOW_DEVELOPMENT_WORKER_TOKEN: "false"
+      AEGAEON_CONTROL_TOKEN: ${AEGAEON_CONTROL_TOKEN:?set a strong control token}
       AEGAEON_DEMO_MODE: "true"
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - aegaeon-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   worker:
     build:
       context: .
       dockerfile: apps/controller/Dockerfile
-    command: ["python", "-m", "worker.worker", "--controller", "ws://controller:8000/ws/worker", "--token", "${AEGAEON_WORKER_TOKEN:-development-token}"]
+    command: ["python", "-m", "worker.worker", "--controller", "ws://controller:8000/ws/worker", "--token", "${AEGAEON_WORKER_TOKEN:?set a strong worker token}"]
+    environment:
+      AEGAEON_WORKER_STATE_DIR: /worker-state
     depends_on:
-      - controller
+      controller:
+        condition: service_healthy
+    volumes:
+      - aegaeon-worker-state:/worker-state
+    restart: unless-stopped
 
   web:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
       args:
-        NEXT_PUBLIC_AEGAEON_API_URL: http://127.0.0.1:8000
+        NEXT_PUBLIC_AEGAEON_API_URL: /api/controller
         NEXT_PUBLIC_AEGAEON_WS_URL: ws://127.0.0.1:8000
+        AEGAEON_CONTROLLER_URL: http://controller:8000
+    environment:
+      AEGAEON_CONTROLLER_URL: http://controller:8000
+      AEGAEON_CONTROL_TOKEN: ${AEGAEON_CONTROL_TOKEN:?set a strong control token}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
-      - controller
+      controller:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 volumes:
   aegaeon-data:
+  aegaeon-worker-state:
+
 

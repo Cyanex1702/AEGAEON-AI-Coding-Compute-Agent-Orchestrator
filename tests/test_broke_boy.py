@@ -35,7 +35,8 @@ def test_broke_project_recommendation_notebook_and_one_time_pairing(
     project = response.json()
     assert project["options"]["execution_mode"] == "broke_boy"
     assert project["options"]["selected_model"]
-    assert project["options"]["selected_model_vram_mb"] <= 12_750
+    assert project["options"]["selected_model"] != "Qwen/Qwen2.5-Coder-7B-Instruct"
+    assert project["options"]["selected_model_vram_mb"] <= 12_000
 
     run = client.post(f"/projects/{project['id']}/run")
     assert run.status_code == 409
@@ -54,10 +55,27 @@ def test_broke_project_recommendation_notebook_and_one_time_pairing(
     notebook_response = client.get(first["download_url"])
     assert notebook_response.status_code == 200
     notebook_text = notebook_response.text
+    notebook_data = notebook_response.json()
     assert first["pairing_code"] not in notebook_text
     assert "development-token" not in notebook_text
     assert "getpass.getpass" in notebook_text
     assert "model.generate" in notebook_text
+    assert "expandable_segments:True" in notebook_text
+    assert "vram_reserved_mb" in notebook_text
+    assert "MODEL_CANDIDATES" in notebook_text
+    assert "PROMPT_MEMORY_LIMIT" in notebook_text
+    assert "max_recommended_prompt_tokens" in notebook_text
+    notebook_source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook_data["cells"]
+        if cell["cell_type"] == "code"
+    )
+    risk_assignment = notebook_source.index("memory_risk_profile = (")
+    risk_registration = notebook_source.index('"memory_risk_profile":memory_risk_profile')
+    assert risk_assignment < risk_registration
+    for index, cell in enumerate(notebook_data["cells"]):
+        if cell["cell_type"] == "code":
+            compile("".join(cell["source"]), f"worker-cell-{index}", "exec")
 
     redeemed = client.post("/pairing/redeem", json={"pairing_code": first["pairing_code"]})
     assert redeemed.status_code == 200
@@ -65,7 +83,10 @@ def test_broke_project_recommendation_notebook_and_one_time_pairing(
     assert credential["worker_token"] not in notebook_text
     assert credential["model_id"] == project["options"]["selected_model"]
     with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(f"/ws/worker?token={credential['worker_token']}") as socket:
+        with client.websocket_connect(
+            "/ws/worker",
+            headers={"x-aegaeon-worker-token": credential["worker_token"]},
+        ) as socket:
             socket.send_json(
                 {
                     "type": "worker.register",
@@ -83,6 +104,59 @@ def test_broke_project_recommendation_notebook_and_one_time_pairing(
                 }
             )
             socket.receive_json()
+    assert (
+        client.post("/pairing/redeem", json={"pairing_code": first["pairing_code"]}).status_code
+        == 400
+    )
+
+    fallback_model = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    with client.websocket_connect(
+        "/ws/worker",
+        headers={"x-aegaeon-worker-token": credential["worker_token"]},
+    ) as socket:
+        socket.send_json(
+            {
+                "type": "worker.register",
+                "worker_id": credential["worker_id"],
+                "hostname": credential["worker_id"],
+                "hardware": {
+                    "cpu_cores": 2,
+                    "ram_mb": 12_000,
+                    "gpu": {
+                        "available": True,
+                        "name": "NVIDIA T4",
+                        "vram_mb": 8_000,
+                        "total_mb": 8_000,
+                        "free_mb": 7_000,
+                    },
+                },
+                "capabilities": ["model.generate"],
+                "models": [
+                    {
+                        "id": credential["model_id"],
+                        "loaded": False,
+                        "status": "incompatible",
+                        "runtime": "transformers",
+                        "quantization": "4bit",
+                    },
+                    {
+                        "id": fallback_model,
+                        "loaded": True,
+                        "status": "ready",
+                        "runtime": "transformers",
+                        "quantization": "4bit",
+                        "max_recommended_prompt_tokens": 4_096,
+                        "max_recommended_output_tokens": 1_024,
+                    },
+                ],
+            }
+        )
+        registered = socket.receive_json()
+        assert registered["type"] == "worker.registered"
+        assert registered["model_adaptation"]["selected_model"] == fallback_model
+
+    adapted_project = client.get(f"/projects/{project['id']}").json()
+    assert adapted_project["options"]["selected_model"] == fallback_model
     assert (
         client.post("/pairing/redeem", json={"pairing_code": first["pairing_code"]}).status_code
         == 400
@@ -253,7 +327,9 @@ def test_broke_model_worker_completes_typed_generation_and_verification(
     selected_model = project["options"]["selected_model"]
     minimum_vram = project["options"]["selected_model_vram_mb"]
 
-    with client.websocket_connect("/ws/worker?token=test-worker-token") as socket:
+    with client.websocket_connect(
+        "/ws/worker", headers={"x-aegaeon-worker-token": "test-worker-token"}
+    ) as socket:
         socket.send_json(
             {
                 "type": "worker.register",
@@ -306,20 +382,22 @@ def test_broke_model_worker_completes_typed_generation_and_verification(
             },
         )
 
-        tests_job = socket.receive_json()
-        assert tests_job["job_type"] == "model.generate"
-        _complete_model_job(
-            socket,
-            tests_job,
-            {
-                "tests/test_more.py": (
+        received_task_keys: list[str] = []
+        for _ in range(2):
+            generation_job = socket.receive_json()
+            assert generation_job["job_type"] == "model.generate"
+            task_key = str(generation_job["task_id"]).split(":")[-1]
+            received_task_keys.append(task_key)
+            files = {f"generated/{task_key}.txt": f"completed {task_key}\n"}
+            if task_key == "tests":
+                files["tests/test_more.py"] = (
                     "from calculator import add\n\n\n"
                     "def test_negative_add() -> None:\n"
                     "    assert add(-2, 1) == -1\n"
                 )
-            },
-        )
+            _complete_model_job(socket, generation_job, files)
 
+        assert received_task_keys == ["implementation", "tests"]
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             project = client.get(f"/projects/{project['id']}").json()
@@ -329,7 +407,7 @@ def test_broke_model_worker_completes_typed_generation_and_verification(
 
     assert project["status"] == "completed"
     jobs = client.get(f"/projects/{project['id']}/jobs").json()
-    assert len(jobs) == 2
+    assert len(jobs) == 3
     assert {job["job_type"] for job in jobs} == {"model.generate"}
     assert {job["status"] for job in jobs} == {"COMPLETED"}
     events = client.get(f"/projects/{project['id']}/events").json()

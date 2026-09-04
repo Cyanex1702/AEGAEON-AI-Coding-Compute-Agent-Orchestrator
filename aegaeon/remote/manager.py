@@ -266,6 +266,22 @@ class RemoteConnectivityManager:
                 return await self._fail(str(exc))
 
     async def restart(self) -> RemoteConnectionRead:
+        if (
+            self._status.state == RemoteConnectionState.READY
+            and self._provider
+            and self._provider.running
+            and self._status.public_url
+        ):
+            try:
+                latency = await self._verify_public(self._status.public_url)
+                self._status.rest_ok = True
+                self._status.websocket_ok = True
+                self._status.latency_ms = latency
+                self._status.error = None
+                self._status.updated_at = datetime.now(UTC)
+                return self.status()
+            except (httpx.HTTPError, RuntimeError, ValueError):
+                pass
         if not self._last_request:
             return await self.start("auto")
         return await self.start(*self._last_request)
@@ -353,26 +369,56 @@ class RemoteConnectivityManager:
             if value.get("type") != "probe.ok":
                 raise RuntimeError("Remote endpoint did not complete the worker WebSocket probe.")
 
+    async def _verify_public(self, public_url: str) -> int:
+        latency = await self._verify_https(public_url)
+        await self._verify_websocket(public_url)
+        return latency
+
     async def _monitor(self) -> None:
+        consecutive_failures = 0
         try:
             while self._provider and self._status.state == RemoteConnectionState.READY:
-                await asyncio.sleep(5)
-                if self._provider.running:
+                await asyncio.sleep(self.settings.remote_probe_interval_seconds)
+                healthy = self._provider.running
+                if healthy and self._status.public_url:
+                    try:
+                        latency = await self._verify_public(self._status.public_url)
+                        self._status.rest_ok = True
+                        self._status.websocket_ok = True
+                        self._status.latency_ms = latency
+                    except (httpx.HTTPError, RuntimeError, ValueError):
+                        healthy = False
+                if healthy:
+                    consecutive_failures = 0
                     continue
-                for attempt in range(1, 4):
+                consecutive_failures += 1
+                if consecutive_failures < self.settings.remote_failure_threshold:
+                    self._status.updated_at = datetime.now(UTC)
+                    await self.events.publish(
+                        "tunnel.health_degraded",
+                        "Remote connection probe failed; confirming before reconnecting",
+                        payload={"consecutive_failures": consecutive_failures},
+                    )
+                    continue
+                self._status.rest_ok = False
+                self._status.websocket_ok = False
+                attempts = self.settings.remote_recovery_attempts
+                for attempt in range(1, attempts + 1):
                     self._status.state = RemoteConnectionState.RECONNECTING
                     self._status.reconnect_attempt = attempt
                     self._status.updated_at = datetime.now(UTC)
                     await self.events.publish(
                         "tunnel.reconnecting",
-                        f"Remote connection lost; reconnecting (attempt {attempt}/3)",
+                        f"Remote connection lost; reconnecting (attempt {attempt}/{attempts})",
                         payload={"attempt": attempt},
                     )
                     result = await self.restart()
                     if result.state == RemoteConnectionState.READY:
                         return
-                    await asyncio.sleep(min(attempt * 2, 5))
-                await self._fail("Remote connection could not be recovered after 3 attempts.")
+                    await asyncio.sleep(min(60, 2**attempt))
+                await self._fail(
+                    f"Remote connection could not be recovered after {attempts} attempts."
+                )
                 return
         except asyncio.CancelledError:
             raise

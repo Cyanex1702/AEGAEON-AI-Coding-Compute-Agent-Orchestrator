@@ -15,6 +15,7 @@ def settings(tmp_path) -> Settings:
         database_url=f"sqlite:///{tmp_path / 'aegaeon-test.db'}",
         data_dir=tmp_path / "data",
         worker_token="test-worker-token",
+        allow_development_worker_token=True,
         heartbeat_timeout_seconds=5,
         command_timeout_seconds=30,
     )

@@ -1,7 +1,32 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from fnmatch import fnmatch
+from pathlib import Path, PurePosixPath
+
+SENSITIVE_PATTERNS = {
+    ".env",
+    ".env.*",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "credentials*.json",
+    "service-account*.json",
+    ".aws/*",
+    ".ssh/*",
+}
+
+
+def is_sensitive_path(path: str | Path) -> bool:
+    normalized = PurePosixPath(str(path).replace("\\", "/")).as_posix().lower()
+    name = PurePosixPath(normalized).name
+    return any(
+        fnmatch(normalized, pattern) or fnmatch(name, pattern) for pattern in SENSITIVE_PATTERNS
+    )
 
 
 class RepositoryContext:
@@ -34,7 +59,6 @@ class RepositoryContext:
         ".webp",
         ".zip",
     }
-    sensitive_names = {".env", "credentials.json", "id_rsa", "id_ed25519"}
 
     def __init__(self, repo: Path, maximum_file_bytes: int = 100_000) -> None:
         self.repo = repo.resolve()
@@ -104,6 +128,6 @@ class RepositoryContext:
         relative = path.relative_to(self.repo)
         if any(part in self.ignored_directories for part in relative.parts):
             return True
-        if path.name.lower() in self.sensitive_names:
+        if is_sensitive_path(relative):
             return True
         return path.suffix.lower() in self.ignored_suffixes

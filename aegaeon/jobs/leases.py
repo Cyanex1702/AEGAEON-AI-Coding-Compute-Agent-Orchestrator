@@ -8,8 +8,22 @@ from sqlalchemy import select
 from aegaeon.database.models import JobRecord, ProjectRecord, TaskRecord
 from aegaeon.database.session import Database
 from aegaeon.protocol.schemas import JobAssign, JobRead, JobState, TaskState
+from aegaeon.security.redaction import redact_diagnostics
 
-ACTIVE_JOB_STATES = {JobState.ASSIGNED.value, JobState.RUNNING.value}
+ACTIVE_JOB_STATES = {
+    JobState.OFFERED.value,
+    JobState.ACKED.value,
+    JobState.ASSIGNED.value,
+    JobState.RUNNING.value,
+    JobState.RESULT_UPLOADED.value,
+    JobState.COMMITTING.value,
+}
+TERMINAL_JOB_STATES = {
+    JobState.COMPLETED.value,
+    JobState.FAILED.value,
+    JobState.INTERRUPTED.value,
+    JobState.CANCELLED.value,
+}
 ACTIVE_TASK_STATES = {
     TaskState.ASSIGNED.value,
     TaskState.RUNNING.value,
@@ -31,6 +45,8 @@ class JobLeaseManager:
             record = JobRecord(
                 id=job.job_id,
                 project_id=job.project_id,
+                run_id=job.run_id,
+                attempt_id=job.attempt_id,
                 task_id=job.task_id,
                 job_type=job.job_type,
                 agent_role=job.agent_role,
@@ -43,36 +59,117 @@ class JobLeaseManager:
                     "stage": job.payload.get("stage"),
                     "file_count": len(job.payload.get("files", {})),
                 },
+                payload=job.payload,
                 created_at=now,
                 updated_at=now,
             )
             session.add(record)
         return self.get(job.job_id)
 
-    def assign(self, job_id: str, worker_id: str) -> None:
+    def assign(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        lease_token: str = "",
+        connection_generation: int = 0,
+        offer_timeout_seconds: int | None = None,
+    ) -> None:
         now = datetime.now(UTC)
         with self.database.session() as session:
             job = self._get(session, job_id)
             job.worker_id = worker_id
-            job.status = JobState.ASSIGNED.value
+            job.status = JobState.OFFERED.value if lease_token else JobState.ASSIGNED.value
+            job.lease_token = lease_token
+            job.connection_generation = connection_generation
             job.assigned_at = now
             job.updated_at = now
             job.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
+            job.offer_expires_at = now + timedelta(
+                seconds=offer_timeout_seconds or self.lease_seconds
+            )
 
-    def start(self, job_id: str) -> None:
+    def acknowledge(
+        self,
+        job_id: str,
+        worker_id: str,
+        attempt_id: str | None,
+        lease_token: str,
+        sequence: int,
+    ) -> None:
         now = datetime.now(UTC)
         with self.database.session() as session:
             job = self._get(session, job_id)
-            job.status = JobState.RUNNING.value
-            job.started_at = now
+            self._verify_owner(job, worker_id, attempt_id, lease_token)
+            if job.status == JobState.ACKED.value:
+                return
+            if job.status != JobState.OFFERED.value:
+                raise RuntimeError(f"job offer cannot be acknowledged from {job.status}")
+            job.status = JobState.ACKED.value
+            job.acknowledged_at = now
+            job.message_sequence = max(job.message_sequence, sequence)
             job.updated_at = now
             job.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
 
-    def complete(self, job_id: str, result: dict[str, Any]) -> None:
-        self._finish(job_id, JobState.COMPLETED, result=result)
+    def start(
+        self,
+        job_id: str,
+        worker_id: str | None = None,
+        attempt_id: str | None = None,
+        lease_token: str = "",
+        sequence: int = 0,
+    ) -> None:
+        now = datetime.now(UTC)
+        with self.database.session() as session:
+            job = self._get(session, job_id)
+            if worker_id is not None:
+                self._verify_owner(job, worker_id, attempt_id, lease_token)
+            if job.status == JobState.RUNNING.value:
+                return
+            if job.status not in {
+                JobState.ACKED.value,
+                JobState.ASSIGNED.value,
+                JobState.OFFERED.value,
+            }:
+                raise RuntimeError(f"job cannot start from {job.status}")
+            job.status = JobState.RUNNING.value
+            job.started_at = job.started_at or now
+            job.message_sequence = max(job.message_sequence, sequence)
+            job.updated_at = now
+            job.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
 
-    def fail(self, job_id: str, error: str, result: dict[str, Any] | None = None) -> None:
-        self._finish(job_id, JobState.FAILED, error=error, result=result or {})
+    def complete(self, job_id: str, result: dict[str, Any], result_hash: str | None = None) -> None:
+        self._finish(job_id, JobState.COMPLETED, result=result, result_hash=result_hash)
+
+    def fail(
+        self,
+        job_id: str,
+        error: str,
+        result: dict[str, Any] | None = None,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        self._finish(
+            job_id,
+            JobState.FAILED,
+            error=error,
+            result=result or {},
+            diagnostics=diagnostics or {},
+        )
+
+    def append_log(self, job_id: str, entry: dict[str, Any]) -> None:
+        """Persist a bounded job log and mirror it onto the task timeline."""
+
+        now = datetime.now(UTC)
+        with self.database.session() as session:
+            job = self._get(session, job_id)
+            safe_entry = redact_diagnostics(entry)
+            job.logs = [*job.logs[-199:], safe_entry]
+            job.updated_at = now
+            task = session.get(TaskRecord, job.task_id)
+            if task:
+                stage = safe_entry.get("stage", "worker")
+                message = safe_entry.get("message", "")
+                task.logs = [*task.logs[-199:], f"[{stage}] {message}"]
 
     def complete_locally(self, job_id: str, result: dict[str, Any]) -> None:
         now = datetime.now(UTC)
@@ -94,8 +191,36 @@ class JobLeaseManager:
                 return
             self._interrupt_record(session, job, reason, now)
 
-    def extend_worker(self, worker_id: str) -> None:
+    def extend_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        attempt_id: str | None,
+        *,
+        progress_sequence: int = 0,
+    ) -> None:
         now = datetime.now(UTC)
+        with self.database.session() as session:
+            job = self._get(session, job_id)
+            if job.worker_id != worker_id or (
+                attempt_id and job.attempt_id and attempt_id != job.attempt_id
+            ):
+                raise PermissionError("heartbeat does not own this job attempt")
+            if job.status not in ACTIVE_JOB_STATES:
+                return
+            job.message_sequence = max(job.message_sequence, progress_sequence)
+            job.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
+            job.updated_at = now
+
+    def request_cancel(self, job_id: str) -> None:
+        now = datetime.now(UTC)
+        with self.database.session() as session:
+            job = self._get(session, job_id)
+            if job.status in ACTIVE_JOB_STATES:
+                job.cancel_requested_at = now
+                job.updated_at = now
+
+    def active_for_worker(self, worker_id: str) -> list[JobRead]:
         with self.database.session() as session:
             jobs = session.scalars(
                 select(JobRecord).where(
@@ -103,9 +228,7 @@ class JobLeaseManager:
                     JobRecord.status.in_(ACTIVE_JOB_STATES),
                 )
             ).all()
-            for job in jobs:
-                job.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
-                job.updated_at = now
+            return [JobRead.model_validate(job) for job in jobs]
 
     def interrupt_worker(self, worker_id: str, reason: str) -> list[str]:
         now = datetime.now(UTC)
@@ -170,9 +293,7 @@ class JobLeaseManager:
             jobs = session.scalars(
                 select(JobRecord).where(
                     JobRecord.project_id == project_id,
-                    JobRecord.status.in_(
-                        [JobState.QUEUED.value, JobState.ASSIGNED.value, JobState.RUNNING.value]
-                    ),
+                    JobRecord.status.in_({JobState.QUEUED.value, *ACTIVE_JOB_STATES}),
                 )
             ).all()
             for job in jobs:
@@ -181,11 +302,19 @@ class JobLeaseManager:
                 job.updated_at = now
                 job.lease_expires_at = None
 
-    def list(self, project_id: str | None = None, limit: int = 500) -> list[JobRead]:
+    def list(
+        self,
+        project_id: str | None = None,
+        limit: int = 500,
+        include_history: bool = False,
+    ) -> list[JobRead]:
         with self.database.session() as session:
             statement = select(JobRecord).order_by(JobRecord.created_at.desc()).limit(limit)
             if project_id:
                 statement = statement.where(JobRecord.project_id == project_id)
+                project = session.get(ProjectRecord, project_id)
+                if project and project.active_run_id and not include_history:
+                    statement = statement.where(JobRecord.run_id == project.active_run_id)
             return [JobRead.model_validate(item) for item in session.scalars(statement).all()]
 
     def get(self, job_id: str) -> JobRead:
@@ -199,16 +328,50 @@ class JobLeaseManager:
         *,
         result: dict[str, Any],
         error: str | None = None,
+        diagnostics: dict[str, Any] | None = None,
+        result_hash: str | None = None,
     ) -> None:
         now = datetime.now(UTC)
         with self.database.session() as session:
             job = self._get(session, job_id)
+            if job.status in TERMINAL_JOB_STATES:
+                if result_hash and job.result_hash and result_hash != job.result_hash:
+                    raise RuntimeError("conflicting terminal result hash")
+                return
+            safe_diagnostics = redact_diagnostics(diagnostics or {})
             job.status = status.value
-            job.result = result
-            job.error = error
+            job.result = redact_diagnostics(result)
+            job.result_hash = result_hash or job.result_hash
+            job.result_uploaded_at = now
+            job.error = str(redact_diagnostics(error)) if error else None
+            job.diagnostics = safe_diagnostics
+            job.failure_stage = safe_diagnostics.get("failure_stage") or safe_diagnostics.get(
+                "stage"
+            )
+            job.failure_classification = safe_diagnostics.get(
+                "failure_classification"
+            ) or safe_diagnostics.get("classification")
+            job.error_type = safe_diagnostics.get("error_type")
+            job.retry_strategy = safe_diagnostics.get("retry_strategy")
+            job.failed_at = now if status == JobState.FAILED else None
             job.completed_at = now
             job.updated_at = now
             job.lease_expires_at = None
+            job.offer_expires_at = None
+
+    @staticmethod
+    def _verify_owner(
+        job: JobRecord,
+        worker_id: str,
+        attempt_id: str | None,
+        lease_token: str,
+    ) -> None:
+        if job.worker_id != worker_id:
+            raise PermissionError("worker does not own this job")
+        if job.attempt_id and attempt_id != job.attempt_id:
+            raise PermissionError("worker attempt does not match durable job attempt")
+        if job.lease_token and lease_token != job.lease_token:
+            raise PermissionError("worker lease fencing token is stale")
 
     @staticmethod
     def _interrupt_record(session: Any, job: JobRecord, reason: str, now: datetime) -> None:

@@ -7,6 +7,11 @@ from uuid import uuid4
 
 from aegaeon.database.models import ArtifactRecord
 from aegaeon.database.session import Database
+from aegaeon.portable import validate_portable_filename
+
+
+class ArtifactStorageError(OSError):
+    """A deterministic controller-side artifact persistence failure."""
 
 
 class ArtifactManager:
@@ -22,14 +27,15 @@ class ArtifactManager:
         filename: str,
         content: bytes | str | dict[str, str],
     ) -> ArtifactRecord:
-        safe_name = Path(filename).name
-        if safe_name != filename or safe_name in {"", ".", ".."}:
-            raise ValueError("unsafe artifact filename")
+        safe_name = validate_portable_filename(filename)
         artifact_id = f"artifact-{uuid4().hex}"
         artifact_dir = (self.projects_dir / project_id / "artifacts").resolve()
         if not artifact_dir.is_relative_to(self.projects_dir):
             raise ValueError("artifact path escapes data directory")
-        artifact_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ArtifactStorageError(f"artifact directory creation failed: {exc}") from exc
         path = artifact_dir / f"{artifact_id}-{safe_name}"
         if isinstance(content, dict):
             raw = json.dumps(content, indent=2, sort_keys=True).encode()
@@ -37,7 +43,12 @@ class ArtifactManager:
             raw = content.encode()
         else:
             raw = content
-        path.write_bytes(raw)
+        try:
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_bytes(raw)
+            temporary.replace(path)
+        except OSError as exc:
+            raise ArtifactStorageError(f"artifact write failed: {exc}") from exc
         record = ArtifactRecord(
             id=artifact_id,
             project_id=project_id,
@@ -48,12 +59,23 @@ class ArtifactManager:
             size_bytes=len(raw),
             checksum=hashlib.sha256(raw).hexdigest(),
         )
-        with self.database.session() as session:
-            session.add(record)
+        try:
+            with self.database.session() as session:
+                session.add(record)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
         return record
 
     def path_for(self, artifact: ArtifactRecord) -> Path:
         path = (self.projects_dir / artifact.relative_path).resolve()
         if not path.is_relative_to(self.projects_dir):
             raise ValueError("artifact path escapes data directory")
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise ArtifactStorageError(f"artifact is missing or unreadable: {exc}") from exc
+        checksum = hashlib.sha256(raw).hexdigest()
+        if len(raw) != artifact.size_bytes or checksum != artifact.checksum:
+            raise ArtifactStorageError("artifact checksum or size does not match its record")
         return path

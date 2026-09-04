@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import random
 from typing import Any
 
 import httpx
@@ -24,6 +26,7 @@ class OpenAICompatibleProvider(ModelProvider):
         self.timeout = timeout
         self.max_output_tokens = max_output_tokens
         self.structured_output_mode = structured_output_mode
+        self.client = httpx.AsyncClient(timeout=self.timeout)
 
     @property
     def model_id(self) -> str:
@@ -35,7 +38,7 @@ class OpenAICompatibleProvider(ModelProvider):
 
     @property
     def headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json", "User-Agent": "AEGAEON/0.2"}
+        headers = {"Content-Type": "application/json", "User-Agent": "AEGAEON/0.3"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
@@ -76,25 +79,36 @@ class OpenAICompatibleProvider(ModelProvider):
         if response_format:
             payload["response_format"] = response_format
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
+            response: httpx.Response | None = None
+            for attempt in range(3):
+                response = await self.client.post(
                     f"{self.base_url}/chat/completions",
                     json=payload,
                     headers=self.headers,
                 )
                 if response.status_code == 400 and "max_completion_tokens" in response.text:
                     payload["max_tokens"] = payload.pop("max_completion_tokens")
-                    response = await client.post(
+                    response = await self.client.post(
                         f"{self.base_url}/chat/completions",
                         json=payload,
                         headers=self.headers,
                     )
+                if response.status_code not in {429, 502, 503, 504} or attempt == 2:
+                    break
+                retry_after = response.headers.get("retry-after", "")
+                try:
+                    delay = min(30.0, max(0.5, float(retry_after)))
+                except ValueError:
+                    delay = min(8.0, 1.0 * 2**attempt)
+                await asyncio.sleep(random.uniform(delay / 2, delay))
         except httpx.TimeoutException as exc:
             raise ProviderRequestError(
                 f"Model request timed out after {self.timeout:.0f} seconds"
             ) from exc
         except httpx.HTTPError as exc:
             raise ProviderRequestError(f"Could not reach model endpoint: {exc}") from exc
+        if response is None:
+            raise ProviderRequestError("Model endpoint returned no response")
         if response.is_error:
             detail = response.text[:2_000]
             raise ProviderRequestError(
@@ -122,10 +136,16 @@ class OpenAICompatibleProvider(ModelProvider):
 
     async def probe(self) -> tuple[bool, str | None]:
         try:
-            async with httpx.AsyncClient(timeout=min(self.timeout, 10)) as client:
-                response = await client.get(f"{self.base_url}/models", headers=self.headers)
+            response = await self.client.get(
+                f"{self.base_url}/models",
+                headers=self.headers,
+                timeout=min(self.timeout, 10),
+            )
             if response.is_success:
                 return True, None
             return False, f"HTTP {response.status_code}: {response.text[:500]}"
         except httpx.HTTPError as exc:
             return False, str(exc)
+
+    async def aclose(self) -> None:
+        await self.client.aclose()

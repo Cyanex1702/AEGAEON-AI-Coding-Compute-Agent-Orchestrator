@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import {
-  BrainCircuit,
   Check,
   Copy,
   Database,
@@ -12,23 +11,22 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { Integrations, ProviderStatus } from "@/lib/types";
+import type { ProviderStatus } from "@/lib/types";
 import { RemoteConnectivityPanel } from "./remote-connectivity";
 import { Badge, StatusDot } from "./ui";
 
 export function SettingsView() {
   const [provider, setProvider] = useState<ProviderStatus | null>(null);
   const [checking, setChecking] = useState(false);
-  const [integrations, setIntegrations] = useState<Integrations | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void Promise.all([api.providerStatus(), api.integrations()])
-      .then(([providerStatus, integrationStatus]) => {
-        setProvider(providerStatus);
-        setIntegrations(integrationStatus);
-      })
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
+    void api
+      .providerStatus()
+      .then(setProvider)
+      .catch((reason: unknown) =>
+        setError(reason instanceof Error ? reason.message : String(reason)),
+      );
   }, []);
 
   async function checkConnection() {
@@ -184,3 +182,4 @@ function CodeCopy({ code }: { code: string }) {
     </div>
   );
 }
+

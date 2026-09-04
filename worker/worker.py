@@ -26,11 +26,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quantization", choices=["4bit", "8bit", "bf16"], default="4bit")
     parser.add_argument("--minimum-vram-mb", type=int, default=3072)
     parser.add_argument("--max-context", type=int, default=32768)
+    parser.add_argument(
+        "--cuda-allocator-config",
+        default=os.getenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.cuda_allocator_config:
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", args.cuda_allocator_config)
     model_runtime = None
     if args.model_id:
         model_runtime = TransformersRuntime(

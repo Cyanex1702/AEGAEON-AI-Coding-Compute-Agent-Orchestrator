@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bell, Command, Menu, Search, Wifi, WifiOff, X } from "lucide-react";
 import { Dashboard } from "./dashboard";
+import { ComputeView } from "./compute-view";
 import { ModelsView } from "./models-view";
 import { NewProject } from "./new-project";
 import { ProjectView } from "./project-view";
@@ -67,7 +68,7 @@ export function AegaeonShell() {
 
         <div className="content-area">
           {data.error && <div className="controller-error"><div><WifiOff className="h-4 w-4" /><span>Controller unavailable: {data.error}</span></div><code>uvicorn apps.controller.main:app --reload</code><button onClick={() => void data.refresh()}><StatusDot status="failed" /> Retry</button></div>}
-          {data.loading ? <LoadingState /> : view === "dashboard" ? <Dashboard stats={data.stats} projects={data.projects} workers={data.workers} events={data.events} onProject={openProject} onCreate={() => setCreateOpen(true)} /> : view === "project" && selectedProject ? <ProjectView project={selectedProject} liveEvents={data.events} onRefresh={data.refresh} /> : view === "workers" ? <WorkersView workers={data.workers} /> : view === "models" ? <ModelsView models={data.models} workers={data.workers} /> : view === "settings" ? <SettingsView /> : <Dashboard stats={data.stats} projects={data.projects} workers={data.workers} events={data.events} onProject={openProject} onCreate={() => setCreateOpen(true)} />}
+          {data.loading ? <LoadingState /> : view === "dashboard" ? <Dashboard stats={data.stats} projects={data.projects} workers={data.workers} events={data.events} onProject={openProject} onCreate={() => setCreateOpen(true)} onRefresh={data.refresh} /> : view === "project" && selectedProject ? <ProjectView project={selectedProject} liveEvents={data.events} onRefresh={data.refresh} workers={data.workers} /> : view === "workers" ? <WorkersView workers={data.workers} /> : view === "compute" ? <ComputeView compute={data.compute} /> : view === "models" ? <ModelsView models={data.models} workers={data.workers} /> : view === "settings" ? <SettingsView /> : <Dashboard stats={data.stats} projects={data.projects} workers={data.workers} events={data.events} onProject={openProject} onCreate={() => setCreateOpen(true)} onRefresh={data.refresh} />}
         </div>
       </section>
       {createOpen && <NewProject onClose={() => setCreateOpen(false)} onCreated={projectCreated} />}

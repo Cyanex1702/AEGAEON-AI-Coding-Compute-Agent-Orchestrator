@@ -124,6 +124,7 @@ def model_client(tmp_path) -> Iterator[TestClient]:
         data_dir=tmp_path / "data",
         worker_token="model-test-token",
         demo_mode=False,
+        allow_unisolated_verification=True,
         llm_model="queued-code-model",
         command_timeout_seconds=30,
     )

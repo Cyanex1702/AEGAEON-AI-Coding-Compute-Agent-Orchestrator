@@ -17,6 +17,7 @@ dependencies = [
   "httpx>=0.28,<1",
   "websockets>=14,<16",
   "psutil>=6,<8",
+  "keyring>=25,<26",
   "python-multipart>=0.0.20,<1",
 ]
 

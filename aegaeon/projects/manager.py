@@ -1,20 +1,32 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
-from aegaeon.database.models import ArtifactRecord, ProjectRecord, TaskRecord
+from aegaeon.database.models import (
+    ArtifactRecord,
+    Base,
+    ProjectRecord,
+    RunRecord,
+    TaskRecord,
+    WorkerNotebookRecord,
+)
 from aegaeon.database.session import Database
+from aegaeon.models.results import ChangeOperation
+from aegaeon.projects.context import RepositoryContext, is_sensitive_path
 from aegaeon.projects.integration import IntegrationConflict
-from aegaeon.protocol.schemas import ArtifactRead, ProjectCreate, ProjectRead, TaskRead
+from aegaeon.protocol.schemas import ArtifactRead, ProjectCreate, ProjectRead, RunRead, TaskRead
 
 
 class ProjectManager:
@@ -63,26 +75,123 @@ class ProjectManager:
         self._git(repo, "commit", "-m", "AEGAEON: initialize canonical workspace")
 
         options = request.model_dump(mode="json", exclude={"prompt", "name", "strategy"})
-        record = ProjectRecord(
-            id=project_id,
-            name=name,
-            prompt=request.prompt,
-            strategy=request.strategy.value,
-            workspace_path=str(repo),
-            options=options,
-        )
         with self.database.session() as session:
+            maximum_order = session.scalar(select(func.max(ProjectRecord.sort_order)))
+            record = ProjectRecord(
+                id=project_id,
+                name=name,
+                prompt=request.prompt,
+                strategy=request.strategy.value,
+                workspace_path=str(repo),
+                options=options,
+                sort_order=(maximum_order if maximum_order is not None else -1) + 1,
+            )
             session.add(record)
         return self.get(project_id)
 
     def list(self) -> list[ProjectRead]:
         with self.database.session() as session:
-            projects = session.scalars(
+            records = session.scalars(
                 select(ProjectRecord)
                 .options(selectinload(ProjectRecord.tasks))
-                .order_by(ProjectRecord.created_at.desc())
+                .order_by(
+                    ProjectRecord.is_pinned.desc(),
+                    ProjectRecord.sort_order,
+                    ProjectRecord.created_at.desc(),
+                )
             ).all()
-            return [ProjectRead.model_validate(item) for item in projects]
+            for record in records:
+                session.expunge(record)
+        return [self._project_read(record) for record in records]
+
+    def set_pinned(self, project_id: str, pinned: bool) -> ProjectRead:
+        with self.database.session() as session:
+            project = session.get(ProjectRecord, project_id)
+            if project is None:
+                raise KeyError(project_id)
+            if project.is_pinned == pinned:
+                return self.get(project_id)
+            project.is_pinned = pinned
+            group = list(
+                session.scalars(
+                    select(ProjectRecord)
+                    .where(ProjectRecord.is_pinned == pinned)
+                    .order_by(ProjectRecord.sort_order, ProjectRecord.created_at.desc())
+                )
+            )
+            ordered = [project, *(item for item in group if item.id != project_id)]
+            for position, item in enumerate(ordered):
+                item.sort_order = position
+        return self.get(project_id)
+
+    def move(self, project_id: str, direction: str) -> ProjectRead:
+        if direction not in {"up", "down"}:
+            raise ValueError("direction must be up or down")
+        with self.database.session() as session:
+            project = session.get(ProjectRecord, project_id)
+            if project is None:
+                raise KeyError(project_id)
+            group = list(
+                session.scalars(
+                    select(ProjectRecord)
+                    .where(ProjectRecord.is_pinned == project.is_pinned)
+                    .order_by(ProjectRecord.sort_order, ProjectRecord.created_at.desc())
+                )
+            )
+            index = next(position for position, item in enumerate(group) if item.id == project_id)
+            target = index - 1 if direction == "up" else index + 1
+            if 0 <= target < len(group):
+                group[index], group[target] = group[target], group[index]
+                for position, item in enumerate(group):
+                    item.sort_order = position
+        return self.get(project_id)
+
+    def delete(self, project_id: str) -> dict[str, object]:
+        project = self.get(project_id)
+        root = Path(project.workspace_path).resolve().parent
+        if root.parent != self.projects_dir or root.name != project_id:
+            raise ValueError("project deletion target is outside the managed project directory")
+        quarantine = self.projects_dir / f".deleting-{project_id}-{uuid4().hex[:8]}"
+        moved = False
+        if root.exists():
+            root.replace(quarantine)
+            moved = True
+        try:
+            with self.database.session() as session:
+                if session.get(ProjectRecord, project_id) is None:
+                    raise KeyError(project_id)
+                # Existing installations may retain the original notebook -> artifact
+                # foreign key even though the portable schema no longer declares it.
+                # Remove notebook children explicitly before generic project cleanup.
+                session.execute(
+                    delete(WorkerNotebookRecord).where(
+                        WorkerNotebookRecord.project_id == project_id
+                    )
+                )
+                for table in reversed(Base.metadata.sorted_tables):
+                    if (
+                        table.name
+                        in {
+                            ProjectRecord.__tablename__,
+                            WorkerNotebookRecord.__tablename__,
+                        }
+                        or "project_id" not in table.c
+                    ):
+                        continue
+                    session.execute(delete(table).where(table.c.project_id == project_id))
+                session.execute(delete(ProjectRecord).where(ProjectRecord.id == project_id))
+        except Exception:
+            if moved and quarantine.exists() and not root.exists():
+                quarantine.replace(root)
+            raise
+        if moved and quarantine.exists():
+
+            def remove_readonly(function: object, filename: str, _: BaseException) -> None:
+                os.chmod(filename, stat.S_IWRITE)
+                function(filename)  # type: ignore[operator]
+
+            shutil.rmtree(quarantine, onexc=remove_readonly)
+        return {"project_id": project_id, "filesystem_removed": moved}
 
     def get(self, project_id: str) -> ProjectRead:
         with self.database.session() as session:
@@ -93,16 +202,50 @@ class ProjectManager:
             )
             if not project:
                 raise KeyError(project_id)
-            return ProjectRead.model_validate(project)
+            session.expunge(project)
+        return self._project_read(project)
 
-    def tasks(self, project_id: str) -> list[TaskRead]:
+    def update_options(self, project_id: str, updates: dict[str, object]) -> ProjectRead:
+        """Persist a narrowly scoped runtime adaptation without replacing user options."""
         with self.database.session() as session:
-            items = session.scalars(
+            project = session.get(ProjectRecord, project_id)
+            if project is None:
+                raise KeyError(project_id)
+            project.options = {**dict(project.options or {}), **updates}
+        return self.get(project_id)
+
+    def _project_read(self, project: ProjectRecord) -> ProjectRead:
+        result = ProjectRead.model_validate(project)
+        active_tasks = [task for task in result.tasks if task.run_id == result.active_run_id]
+        if result.active_run_id is None:
+            active_tasks = result.tasks
+        return result.model_copy(update={"tasks": active_tasks})
+
+    def tasks(self, project_id: str, include_history: bool = False) -> list[TaskRead]:
+        with self.database.session() as session:
+            project = session.get(ProjectRecord, project_id)
+            if not project:
+                raise KeyError(project_id)
+            statement = (
                 select(TaskRecord)
                 .where(TaskRecord.project_id == project_id)
                 .order_by(TaskRecord.sequence)
-            ).all()
+            )
+            if project.active_run_id and not include_history:
+                statement = statement.where(TaskRecord.run_id == project.active_run_id)
+            items = session.scalars(statement).all()
             return [TaskRead.model_validate(item) for item in items]
+
+    def runs(self, project_id: str) -> list[RunRead]:
+        with self.database.session() as session:
+            if not session.get(ProjectRecord, project_id):
+                raise KeyError(project_id)
+            records = session.scalars(
+                select(RunRecord)
+                .where(RunRecord.project_id == project_id)
+                .order_by(RunRecord.created_at.desc())
+            ).all()
+            return [RunRead.model_validate(record) for record in records]
 
     def task(self, task_id: str) -> TaskRead:
         with self.database.session() as session:
@@ -138,20 +281,104 @@ class ProjectManager:
         files: dict[str, str],
         base_revision: str | None = None,
     ) -> tuple[list[str], str]:
+        operations = [
+            ChangeOperation(operation="update", path=path, content=content)
+            for path, content in files.items()
+        ]
+        return self.integrate_changes(project_id, task_key, title, operations, base_revision)
+
+    def integrate_changes(
+        self,
+        project_id: str,
+        task_key: str,
+        title: str,
+        changes: list[ChangeOperation | dict[str, object]],
+        base_revision: str | None = None,
+    ) -> tuple[list[str], str]:
         repo = self.repo_path(project_id)
-        prepared = self._prepare_concurrent_merge(repo, files, base_revision)
+        operations = [ChangeOperation.model_validate(item) for item in changes]
+        targets = [item.path for item in operations]
+        if len(targets) != len(set(targets)):
+            raise ValueError("change operation targets must be unique")
+        writes = {
+            item.path: item.content
+            for item in operations
+            if item.operation in {"create", "update"} and item.content is not None
+        }
+        prepared = self._prepare_concurrent_merge(repo, writes, base_revision)
+        current_revision = self._git(repo, "rev-parse", "HEAD").stdout.strip()
+        if self._git(repo, "status", "--porcelain").stdout.strip():
+            raise IntegrationConflict(targets, "canonical repository is not clean")
+        if base_revision and base_revision != current_revision:
+            changed_output = self._git(
+                repo, "diff", "--name-only", f"{base_revision}..{current_revision}"
+            ).stdout
+            changed = {line.strip() for line in changed_output.splitlines() if line.strip()}
+            destructive_sources = {
+                item.from_path or item.path
+                for item in operations
+                if item.operation in {"delete", "rename"}
+            }
+            conflicts = sorted(changed & destructive_sources)
+            if conflicts:
+                raise IntegrationConflict(
+                    conflicts, "delete or rename source changed after the task started"
+                )
+
+        with tempfile.TemporaryDirectory(prefix=".aegaeon-integration-", dir=repo.parent) as root:
+            staged = Path(root) / "workspace"
+            self._git(repo, "worktree", "add", "--detach", str(staged), current_revision)
+            try:
+                modified = self._apply_operations(staged, operations, prepared)
+                self._git(staged, "add", "--all")
+                patch = self._git(
+                    staged, "diff", "--cached", "--binary", "HEAD", check=False
+                ).stdout
+                if not patch.strip():
+                    return list(dict.fromkeys(modified)), ""
+                self._git(staged, "commit", "-m", f"AEGAEON({task_key}): {title}")
+                staged_revision = self._git(staged, "rev-parse", "HEAD").stdout.strip()
+                self._git(repo, "merge", "--ff-only", staged_revision)
+                return list(dict.fromkeys(modified)), patch
+            finally:
+                self._git(repo, "worktree", "remove", "--force", str(staged), check=False)
+
+    def _apply_operations(
+        self,
+        repo: Path,
+        operations: list[ChangeOperation],
+        prepared: dict[str, str],
+    ) -> list[str]:
         modified: list[str] = []
-        for relative_name, content in prepared.items():
-            target = self._safe_target(repo, relative_name)
+        for item in operations:
+            target = self._safe_target(repo, item.path)
+            if item.operation == "delete":
+                if target.exists():
+                    if not target.is_file():
+                        raise ValueError(f"delete target is not a file: {item.path}")
+                    target.unlink()
+                modified.append(item.path)
+                continue
+            if item.operation == "rename":
+                if not item.from_path:
+                    raise ValueError("rename requires from_path")
+                source = self._safe_target(repo, item.from_path)
+                if not source.is_file():
+                    raise ValueError(f"rename source does not exist: {item.from_path}")
+                if target.exists():
+                    raise ValueError(f"rename target already exists: {item.path}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source.replace(target)
+                modified.extend([item.from_path, item.path])
+                continue
+            if item.operation == "create" and target.exists():
+                raise ValueError(f"create target already exists: {item.path}")
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-            modified.append(Path(relative_name).as_posix())
-        self._git(repo, "add", "--all")
-        patch = self._git(repo, "diff", "--cached", "--binary", "HEAD", check=False).stdout
-        if not patch.strip():
-            return modified, ""
-        self._git(repo, "commit", "-m", f"AEGAEON({task_key}): {title}")
-        return modified, patch
+            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+            temporary.write_text(prepared[item.path], encoding="utf-8")
+            temporary.replace(target)
+            modified.append(item.path)
+        return modified
 
     def _prepare_concurrent_merge(
         self, repo: Path, files: dict[str, str], base_revision: str | None
@@ -250,8 +477,22 @@ class ProjectManager:
 
     def export_zip(self, project_id: str) -> Path:
         repo = self.repo_path(project_id)
-        export_root = repo.parent / f"{project_id}-export"
-        archive = Path(shutil.make_archive(str(export_root), "zip", root_dir=repo))
+        archive = repo.parent / f"{project_id}-export.zip"
+        excluded_directories = RepositoryContext.ignored_directories | {
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+        }
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for path in sorted(repo.rglob("*")):
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(repo)
+                if any(part in excluded_directories for part in relative.parts):
+                    continue
+                if is_sensitive_path(relative):
+                    continue
+                bundle.write(path, relative.as_posix())
         return archive
 
     @staticmethod

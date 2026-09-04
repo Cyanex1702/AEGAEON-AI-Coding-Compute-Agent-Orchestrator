@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -53,10 +53,13 @@ export function RemoteConnectivityPanel({ mode = "launchpad", onStatus }: Props)
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  function apply(value: RemoteConnectivity) {
-    setStatus(value);
-    onStatus?.(value);
-  }
+  const apply = useCallback(
+    (value: RemoteConnectivity) => {
+      setStatus(value);
+      onStatus?.(value);
+    },
+    [onStatus],
+  );
 
   useEffect(() => {
     let active = true;
@@ -76,7 +79,7 @@ export function RemoteConnectivityPanel({ mode = "launchpad", onStatus }: Props)
       active = false;
       window.clearInterval(timer);
     };
-  }, [onStatus]);
+  }, [apply, status]);
 
   async function run(action: () => Promise<RemoteConnectivity>) {
     setBusy(true);
@@ -278,3 +281,4 @@ function CheckItem({ label, done, active }: { label: string; done: boolean; acti
     </div>
   );
 }
+

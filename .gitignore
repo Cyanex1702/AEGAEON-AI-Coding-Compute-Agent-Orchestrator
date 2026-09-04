@@ -8,4 +8,12 @@ data/
 apps/web/.next/
 apps/web/node_modules/
 apps/web/.env.local
-
+.local-run-*/
+.pytest-bugfix-*/
+.aegaeon-worker/
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx

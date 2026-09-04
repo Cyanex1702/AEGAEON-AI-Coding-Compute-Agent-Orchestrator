@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { BrainCircuit, Check, Cpu, FlaskConical, Sparkles, WalletCards, X, Zap } from "lucide-react";
+import { Check, FlaskConical, Sparkles, WalletCards, X, Zap } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Project } from "@/lib/types";
 import { RemoteConnectivityPanel } from "./remote-connectivity";
@@ -24,12 +24,12 @@ export function NewProject({ onClose, onCreated }: Props) {
   const [review, setReview] = useState(true);
   const [retryFailed, setRetryFailed] = useState(true);
   const [workerCount, setWorkerCount] = useState(1);
+  const [computeStrategy, setComputeStrategy] = useState<"cheapest" | "balanced" | "fast" | "maximum_quality">("balanced");
   const [computeTarget, setComputeTarget] = useState<"google_colab" | "kaggle" | "local_gpu" | "cloud_gpu">("google_colab");
   const [targetVram, setTargetVram] = useState(15000);
   const [quantization, setQuantization] = useState<"4bit" | "8bit" | "bf16">("4bit");
   const [modelSelection, setModelSelection] = useState<"recommend" | "manual">("recommend");
   const [selectedModel, setSelectedModel] = useState("");
-  const [researchLevel, setResearchLevel] = useState<"standard" | "manual">("standard");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,7 +57,8 @@ export function NewProject({ onClose, onCreated }: Props) {
         selected_model: selectedModel.trim() || undefined,
         target_vram_mb: targetVram,
         quantization,
-        research_level: researchLevel,
+        research_level: "standard",
+        compute_strategy: computeStrategy,
       });
       if (mode === "rich_boy") await api.runProject(project.id);
       onCreated(project);
@@ -95,12 +96,12 @@ export function NewProject({ onClose, onCreated }: Props) {
             <div className="form-grid">
               <div className="field"><label>Compute</label><select value={computeTarget} onChange={(event) => setComputeTarget(event.target.value as typeof computeTarget)}><option value="google_colab">Google Colab</option><option value="kaggle">Kaggle</option><option value="local_gpu">Local GPU</option><option value="cloud_gpu">Cloud GPU</option></select></div>
               <div className="field"><label>Workers</label><div className="stepper"><button onClick={() => setWorkerCount(Math.max(1, workerCount - 1))}>−</button><strong>{workerCount}</strong><button onClick={() => setWorkerCount(Math.min(12, workerCount + 1))}>+</button></div></div>
+              <div className="field"><label>Execution strategy</label><select value={computeStrategy} onChange={(event) => setComputeStrategy(event.target.value as typeof computeStrategy)}><option value="cheapest">Cheapest</option><option value="balanced">Balanced</option><option value="fast">Fast</option><option value="maximum_quality">Maximum quality</option></select></div>
               <div className="field"><label>Target GPU</label><select value={targetVram} onChange={(event) => setTargetVram(Number(event.target.value))}><option value={15000}>T4 · 15 GB</option><option value={24000}>L4 / A10 · 24 GB</option><option value={40000}>A100 · 40 GB</option><option value={80000}>A100 · 80 GB</option></select></div>
               <div className="field"><label>Quantization</label><select value={quantization} onChange={(event) => setQuantization(event.target.value as typeof quantization)}><option value="4bit">4-bit · recommended</option><option value="8bit">8-bit</option><option value="bf16">BF16</option></select></div>
               <div className="field"><label>Model selection</label><select value={modelSelection} onChange={(event) => setModelSelection(event.target.value as typeof modelSelection)}><option value="recommend">Evidence-backed recommendation</option><option value="manual">Manual model ID</option></select></div>
             </div>
             {modelSelection === "manual" && <div className="field mt-3"><label>Hugging Face model ID</label><input value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} placeholder="Qwen/Qwen2.5-Coder-1.5B-Instruct" /></div>}
-<div className="field mt-3"><label>Research level</label><select value={researchLevel} onChange={(event) => setResearchLevel(event.target.value as typeof researchLevel)}><option value="standard">Standard · local evidence</option><option value="manual">Manual advisor prompt</option></select></div>
             {computeTarget !== "local_gpu" && (
               <div className="mt-4 rounded-lg border border-white/[.06] bg-black/20 p-4">
                 <div className="eyebrow mb-3">Remote connection</div>
@@ -127,3 +128,5 @@ function ModeCard({ active, onClick, icon, title, badge, detail }: { active: boo
 }
 
 function Toggle({ checked, onChange, title, detail }: { checked: boolean; onChange: (checked: boolean) => void; title: string; detail: string }) { return <button className="toggle-row" onClick={() => onChange(!checked)}><span className={cn("checkbox", checked && "checkbox-active")}>{checked && <Check className="h-3 w-3" strokeWidth={3} />}</span><span className="text-left"><strong>{title}</strong><small>{detail}</small></span></button>; }
+
+

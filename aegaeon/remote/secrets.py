@@ -24,7 +24,12 @@ class RemoteSecretStore:
 
     def set(self, name: str, value: str) -> None:
         data = self._read()
-        data[name] = self._protect(value)
+        if os.name == "nt":
+            data[name] = self._protect(value)
+        else:
+            keyring = self._keyring()
+            keyring.set_password("AEGAEON", self._keyring_account(name), value)
+            data[name] = "keyring:"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data), encoding="utf-8")
         with suppress(OSError):
@@ -32,7 +37,11 @@ class RemoteSecretStore:
 
     def get(self, name: str) -> str | None:
         encrypted = self._read().get(name)
-        return self._unprotect(encrypted) if encrypted else None
+        if not encrypted:
+            return None
+        if encrypted == "keyring:":
+            return self._keyring().get_password("AEGAEON", self._keyring_account(name))
+        return self._unprotect(encrypted)
 
     def remove(self, name: str) -> None:
         data = self._read()
@@ -50,11 +59,24 @@ class RemoteSecretStore:
             return {}
         return value if isinstance(value, dict) else {}
 
+    def _keyring_account(self, name: str) -> str:
+        return f"{self.path.resolve()}::{name}"
+
+    @staticmethod
+    def _keyring() -> object:
+        try:
+            import keyring
+        except ImportError as exc:
+            raise RuntimeError(
+                "Secure token storage needs the keyring package on this platform"
+            ) from exc
+        return keyring
+
     @staticmethod
     def _protect(value: str) -> str:
         raw = value.encode("utf-8")
         if os.name != "nt":
-            return "plain:" + base64.b64encode(raw).decode()
+            raise RuntimeError("DPAPI protection is only available on Windows")
         return "dpapi:" + base64.b64encode(_crypt_protect(raw)).decode()
 
     @staticmethod

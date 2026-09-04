@@ -25,6 +25,10 @@ class ModelEvidence(BaseModel):
     gated: bool = False
     download_size_gb: float | None = None
     safe_vram_mb: dict[str, int] = Field(default_factory=dict)
+    cpu_offload_support: bool = False
+    multi_gpu_support: bool = False
+    minimum_hardware: dict[str, int] = Field(default_factory=dict)
+    recommended_hardware: dict[str, int] = Field(default_factory=dict)
     benchmark_scores: dict[str, float] = Field(default_factory=dict)
     structured_output_score: float | None = None
     languages: list[str] = Field(default_factory=list)
@@ -97,6 +101,27 @@ CURATED_MODELS = [
         source_url="https://huggingface.co/deepseek-ai/deepseek-coder-1.3b-instruct",
     ),
     ModelEvidence(
+        id="Qwen/Qwen2.5-Coder-3B-Instruct",
+        publisher="Qwen",
+        family="Qwen2.5-Coder",
+        parameter_count_b=3.09,
+        architecture="qwen2",
+        instruction_tuned=True,
+        context_length=32_768,
+        runtimes=["transformers", "vllm"],
+        quantizations=["4bit", "8bit", "bf16"],
+        license="apache-2.0",
+        safe_vram_mb={"4bit": 4_608, "8bit": 6_656, "bf16": 10_240},
+        cpu_offload_support=True,
+        multi_gpu_support=True,
+        minimum_hardware={"ram_mb": 8_192},
+        recommended_hardware={"vram_mb": 6_144, "ram_mb": 12_288},
+        benchmark_scores={"coding": 84, "repair": 79},
+        structured_output_score=87,
+        languages=["English", "Python", "JavaScript", "TypeScript", "Java"],
+        source_url="https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct",
+    ),
+    ModelEvidence(
         id="Qwen/Qwen2.5-Coder-7B-Instruct",
         publisher="Qwen",
         family="Qwen2.5-Coder",
@@ -134,6 +159,9 @@ class HuggingFaceSource:
 class ModelScout:
     """Deterministic evidence registry, hard filter, and explainable scorer."""
 
+    VRAM_SAFETY_RATIO = 0.80
+    PREFILL_WORKSPACE_MB_PER_B_TOKEN = 0.10
+
     def __init__(self, database: Database) -> None:
         self.database = database
         self.hugging_face = HuggingFaceSource()
@@ -155,12 +183,82 @@ class ModelScout:
             rows = session.scalars(select(ModelCatalogRecord).order_by(ModelCatalogRecord.id)).all()
             return [ModelEvidence.model_validate(row.metadata_json) for row in rows]
 
+    @classmethod
+    def estimated_peak_vram(
+        cls,
+        model: ModelEvidence,
+        quantization: str,
+        *,
+        prompt_tokens: int = 8_192,
+        output_tokens: int = 1_024,
+    ) -> int | None:
+        """Conservative full-request estimate, including prefill/attention workspace."""
+        base = model.safe_vram_mb.get(quantization)
+        if base is None:
+            return None
+        parameters = float(model.parameter_count_b or 1.0)
+        token_window = max(1_024, prompt_tokens + output_tokens)
+        workspace = int(parameters * token_window * cls.PREFILL_WORKSPACE_MB_PER_B_TOKEN)
+        return base + max(512, workspace)
+
+    def fallback_ladder(
+        self,
+        model_id: str,
+        quantization: str,
+        *,
+        vram_mb: int,
+        prompt_tokens: int = 8_192,
+        output_tokens: int = 1_024,
+    ) -> list[dict[str, int | str]]:
+        """Return trusted same-family models that fit with enforced VRAM headroom."""
+        catalog = self.list()
+        requested = next((item for item in catalog if item.id == model_id), None)
+        if requested is None:
+            return []
+        requested_parameters = float(requested.parameter_count_b or float("inf"))
+        safe_budget = int(vram_mb * self.VRAM_SAFETY_RATIO)
+        ladder: list[dict[str, int | str]] = []
+        for candidate in catalog:
+            parameters = float(candidate.parameter_count_b or float("inf"))
+            if (
+                candidate.family != requested.family
+                or parameters > requested_parameters
+                or candidate.gated
+                or quantization not in candidate.quantizations
+            ):
+                continue
+            peak = self.estimated_peak_vram(
+                candidate,
+                quantization,
+                prompt_tokens=prompt_tokens,
+                output_tokens=output_tokens,
+            )
+            if peak is None or peak > safe_budget:
+                continue
+            ladder.append(
+                {
+                    "id": candidate.id,
+                    "base_vram_mb": int(candidate.safe_vram_mb[quantization]),
+                    "estimated_peak_vram_mb": peak,
+                }
+            )
+        parameter_counts = {model.id: float(model.parameter_count_b or 0) for model in catalog}
+        return sorted(
+            ladder,
+            key=lambda item: parameter_counts.get(str(item["id"]), 0),
+            reverse=True,
+        )
+
     def recommend(self, request: RecommendationRequest) -> list[ModelRecommendation]:
         target = request.hardware
-        usable_vram = int(target.vram_mb * 0.85)
+        usable_vram = int(target.vram_mb * self.VRAM_SAFETY_RATIO)
         recommendations: list[ModelRecommendation] = []
         for model in self.list():
-            estimate = model.safe_vram_mb.get(target.quantization)
+            estimate = self.estimated_peak_vram(
+                model,
+                target.quantization,
+                prompt_tokens=target.minimum_context,
+            )
             if estimate is None or estimate > usable_vram:
                 continue
             if (
@@ -201,7 +299,10 @@ class ModelScout:
                     confidence="high" if len(model.benchmark_scores) >= 2 else "medium",
                     score_breakdown=breakdown,
                     reasons=[
-                        f"Fits within the {usable_vram} MB safe VRAM budget",
+                        (
+                            f"Estimated full-request peak {estimate} MB fits within the "
+                            f"{usable_vram} MB safe VRAM budget"
+                        ),
                         f"Supports {target.runtime} with {target.quantization}",
                         f"Provides {model.context_length or 0:,} tokens of documented context",
                     ],

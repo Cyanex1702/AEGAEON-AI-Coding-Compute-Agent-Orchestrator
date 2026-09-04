@@ -118,6 +118,63 @@ async def test_automatic_provider_uses_actual_controller_port_and_verifies_both_
 
 
 @pytest.mark.asyncio
+async def test_reconnect_is_idempotent_while_https_and_websocket_are_healthy(
+    remote_manager,
+) -> None:
+    manager, provider, _ = remote_manager
+    first = await manager.start("auto")
+    stopped_before = provider.stopped
+
+    second = await manager.restart()
+
+    assert second.state == RemoteConnectionState.READY
+    assert second.public_url == first.public_url
+    assert second.rest_ok is True
+    assert second.websocket_ok is True
+    assert provider.stopped == stopped_before
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_monitor_keeps_ready_flags_during_one_transient_probe_failure(
+    remote_manager,
+    monkeypatch,
+) -> None:
+    manager, provider, _ = remote_manager
+    provider._running = True
+    manager._provider = provider
+    manager._status.state = RemoteConnectionState.READY
+    manager._status.public_url = "https://first.example"
+    manager._status.rest_ok = True
+    manager._status.websocket_ok = True
+    sleep_calls = 0
+    verify_calls = 0
+
+    async def immediate_sleep(_: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            assert manager._status.rest_ok is True
+            assert manager._status.websocket_ok is True
+
+    async def transient_then_healthy(_: str) -> int:
+        nonlocal verify_calls
+        verify_calls += 1
+        if verify_calls == 1:
+            raise RuntimeError("temporary edge timeout")
+        manager._status.state = RemoteConnectionState.STOPPED
+        return 42
+
+    monkeypatch.setattr("aegaeon.remote.manager.asyncio.sleep", immediate_sleep)
+    monkeypatch.setattr(manager, "_verify_public", transient_then_healthy)
+
+    await manager._monitor()
+
+    assert verify_calls == 2
+    assert sleep_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_provider_unavailable_is_a_friendly_failed_state(tmp_path) -> None:
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'missing.db'}",
@@ -127,9 +184,7 @@ async def test_provider_unavailable_is_a_friendly_failed_state(tmp_path) -> None
     database = Database(settings.database_url)
     database.create_all()
     provider = FakeProvider(["https://unused.example"], installed=False)
-    manager = VerifiedManager(
-        settings, database, EventBus(database), providers={"ngrok": provider}
-    )
+    manager = VerifiedManager(settings, database, EventBus(database), providers={"ngrok": provider})
     status = await manager.start("auto")
     assert status.state == RemoteConnectionState.FAILED
     assert "not installed" in (status.error or "").lower()
@@ -191,7 +246,7 @@ def test_structured_output_repair_is_bounded_and_uses_correction_context() -> No
     result = runtime.generate(payload)
     assert result.summary == "fixed"
     assert runtime.calls == 2
-    assert runtime.message_counts == [2, 4]
+    assert runtime.message_counts == [2, 2]
 
 
 class AlwaysInvalidRuntime(RepairRuntime):
