@@ -6,3 +6,4 @@
 *.bat text eol=crlf
 *.png binary
 *.zip binary
+Install-AEGAEON-v2.0.bat linguist-generated=true
