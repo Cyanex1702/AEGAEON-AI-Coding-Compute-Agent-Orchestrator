@@ -1,0 +1,54 @@
+[
+  {
+    "id": "0",
+    "name": "Qwen2.5-Coder-1.5B-Instruct",
+    "repo": "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+    "revision": "f86cb2c1fa58255f8052cc32aeede1b7482d4361",
+    "file": "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+    "bytes": 1117320768,
+    "sha256": "cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046",
+    "parameters_b": 1.54,
+    "purpose": "coding",
+    "quantization": "Q4_K_M",
+    "capability": "Not benchmarked by AEGAEON on this machine"
+  },
+  {
+    "id": "1",
+    "name": "Qwen2.5-Coder-3B-Instruct",
+    "repo": "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+    "revision": "f74adce6aa16316c625447af059dbebe4983757c",
+    "file": "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+    "bytes": 2104932800,
+    "sha256": "724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7",
+    "parameters_b": 3.09,
+    "purpose": "coding",
+    "quantization": "Q4_K_M",
+    "capability": "Not benchmarked by AEGAEON on this machine"
+  },
+  {
+    "id": "2",
+    "name": "Qwen2.5-Coder-7B-Instruct",
+    "repo": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+    "revision": "13fb94bfda8c8cf22497dc57b78f391a9acb426a",
+    "file": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+    "bytes": 4683073536,
+    "sha256": "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c",
+    "parameters_b": 7.61,
+    "purpose": "coding",
+    "quantization": "Q4_K_M",
+    "capability": "Not benchmarked by AEGAEON on this machine"
+  },
+  {
+    "id": "3",
+    "name": "Qwen3-1.7B",
+    "repo": "Qwen/Qwen3-1.7B-GGUF",
+    "revision": "90862c4b9d2787eaed51d12237eafdfe7c5f6077",
+    "file": "Qwen3-1.7B-Q8_0.gguf",
+    "bytes": 1834426016,
+    "sha256": "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
+    "parameters_b": 1.7,
+    "purpose": "general, supports thinking",
+    "quantization": "Q8_0",
+    "capability": "Not benchmarked by AEGAEON on this machine"
+  }
+]

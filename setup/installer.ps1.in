@@ -1,0 +1,156 @@
+$ErrorActionPreference = 'Stop'
+$AppVersion = '__VERSION__'
+$ExpectedHash = '__HASH__'
+$Payload = @'
+__PAYLOAD__
+'@
+function Get-Hash([byte[]]$Bytes) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant() }
+    finally { $algorithm.Dispose() }
+}
+function Find-Python {
+    $candidates = @()
+    $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($launcher) {
+        try { $found = & $launcher.Source -3 -I -c 'import sys; print(sys.executable if sys.version_info >= (3,11) else str())' 2>$null; if ($LASTEXITCODE -eq 0 -and $found -and (Test-Path -LiteralPath $found)) { return [string]$found } } catch {}
+    }
+    $command = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($command -and $command.Source -notlike '*\WindowsApps\*') { $candidates += $command.Source }
+    $pythonHome = Join-Path $env:LOCALAPPDATA 'Programs\Python'
+    if (Test-Path -LiteralPath $pythonHome) { $candidates += Get-ChildItem -Path (Join-Path $pythonHome 'Python*\python.exe') -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName }
+    foreach ($candidate in $candidates) {
+        try { $found = & $candidate -I -c 'import sys; print(sys.executable if sys.version_info >= (3,11) else str())' 2>$null; if ($LASTEXITCODE -eq 0 -and $found) { return [string]$found } } catch {}
+    }
+    return $null
+}
+function Find-Git {
+    $command = Get-Command git.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    foreach ($candidate in @((Join-Path $env:LOCALAPPDATA 'Programs\Git\cmd\git.exe'), (Join-Path $env:ProgramFiles 'Git\cmd\git.exe'))) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+function Install-Prerequisite([string]$Id) {
+    if ($Mode -ne 'normal') { throw "Test setup requires an existing installation of $Id" }
+    $manager = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if (-not $manager) { throw 'WinGet is unavailable. Install App Installer from Microsoft, or Python 3.11+ and Git from python.org and git-scm.com, then rerun this file.' }
+    Write-Host "Installing $Id for your Windows account. Review any package or Windows prompts."
+    & $manager.Source install --id $Id --exact --source winget --scope user
+    if ($LASTEXITCODE -ne 0) { throw "WinGet did not complete $Id. Resolve its reported error and rerun this file." }
+    $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') + ';' + $env:Path
+}
+try {
+    $Mode = if ($env:AEGAEON_INSTALL_MODE) { $env:AEGAEON_INSTALL_MODE } else { 'normal' }
+    if ($Mode -notin @('normal','verify','extract','setup')) { throw 'Unknown installer mode' }
+    $bytes = [Convert]::FromBase64String($Payload)
+    if ((Get-Hash $bytes) -ne $ExpectedHash) { throw 'Embedded app checksum mismatch. Download a fresh installer.' }
+    Add-Type -AssemblyName System.IO.Compression
+    $memory = New-Object IO.MemoryStream(,$bytes)
+    $archive = New-Object IO.Compression.ZipArchive($memory, [IO.Compression.ZipArchiveMode]::Read)
+    $names = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $total = 0
+    foreach ($entry in $archive.Entries) {
+        $name = $entry.FullName
+        if (-not $name.StartsWith('aegaeon-lite/') -or $name.Contains('\') -or $name -match '(^|/)\.\.?(/|$)|[\x00-\x1f:<>"|?*]' -or $name.EndsWith('/') -or -not $names.Add($name)) { throw 'Invalid embedded archive path' }
+        if ((($entry.ExternalAttributes -shr 16) -band 61440) -eq 40960) { throw 'Embedded archive contains a symbolic link' }
+        $total += $entry.Length
+        if ($entry.Length -gt 4000000 -or $total -gt 10000000 -or $archive.Entries.Count -gt 200) { throw 'Embedded archive exceeds limits' }
+    }
+    if ($Mode -eq 'verify') { @{version=$AppVersion; sha256=$ExpectedHash; files=$names.Count; verified=$true} | ConvertTo-Json -Compress; exit 0 }
+    $InstallRoot = if ($env:AEGAEON_INSTALL_ROOT) { [IO.Path]::GetFullPath($env:AEGAEON_INSTALL_ROOT) } else { Join-Path $env:LOCALAPPDATA 'AEGAEON-Lite' }
+    $VersionRoot = Join-Path $InstallRoot ('versions\' + $AppVersion + '-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
+    New-Item -ItemType Directory -Path $VersionRoot -ErrorAction Stop | Out-Null
+    $prefix = [IO.Path]::GetFullPath($VersionRoot).TrimEnd('\') + '\'
+    foreach ($entry in $archive.Entries) {
+        $target = [IO.Path]::GetFullPath((Join-Path $VersionRoot $entry.FullName.Replace('/','\')))
+        if (-not $target.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)) { throw 'Archive escapes installation folder' }
+        New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($target)) | Out-Null
+        $inputStream = $entry.Open()
+        $outputStream = [IO.File]::Open($target,[IO.FileMode]::CreateNew)
+        try { $inputStream.CopyTo($outputStream) } finally { $inputStream.Dispose(); $outputStream.Dispose() }
+    }
+    $archive.Dispose(); $memory.Dispose()
+    $AppRoot = Join-Path $VersionRoot 'aegaeon-lite'
+    if ($Mode -eq 'extract') { @{root=$InstallRoot; app=$AppRoot; version=$AppVersion; extracted=$true} | ConvertTo-Json -Compress; exit 0 }
+    $python = Find-Python
+    if (-not $python) { Install-Prerequisite 'Python.Python.3.13'; $python = Find-Python }
+    $git = Find-Git
+    if (-not $git) { Install-Prerequisite 'Git.Git'; $git = Find-Git }
+    if (-not $python -or -not $git) { throw 'Python 3.11+ and Git must be available before setup can finish.' }
+    $gitDirectory = Split-Path -Parent $git
+    $env:Path = $gitDirectory + ';' + $env:Path
+    $Venv = Join-Path $VersionRoot '.venv'
+    & $python -I -m venv --without-pip $Venv
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create the app Python environment.' }
+    $VenvPython = Join-Path $Venv 'Scripts\python.exe'
+    Push-Location $AppRoot
+    try { & $VenvPython -B -c 'import aegaeon_lite; from aegaeon_lite.app import App; print(aegaeon_lite.__version__)'; if ($LASTEXITCODE -ne 0) { throw 'App startup check failed.' } }
+    finally { Pop-Location }
+    # App runtime uses the standard library. No pip packages or model downloads are needed.
+    $DataRoot = Join-Path $InstallRoot 'data'
+    $launcherText = @'
+$ErrorActionPreference = 'Stop'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$env:Path = $GitDirectory + ';' + $env:Path
+$statePath = Join-Path $InstallRoot 'server.json'
+function Is-OwnedServer($state) {
+    if (-not $state -or -not $state.pid) { return $false }
+    $processInfo = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$state.pid) -ErrorAction SilentlyContinue
+    return $processInfo -and $processInfo.CommandLine.Contains('aegaeon_lite') -and $processInfo.CommandLine.Contains($DataRoot)
+}
+$mutex = New-Object Threading.Mutex($false, ('Local\AEGAEON-' + $PackageHash.Substring(0,16)))
+if (-not $mutex.WaitOne(0)) { throw 'Another AEGAEON launch is already in progress.' }
+try {
+    $state = if (Test-Path -LiteralPath $statePath) { Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json } else { $null }
+    if ($env:AEGAEON_STOP -eq '1') {
+        if (Is-OwnedServer $state) { & taskkill.exe /PID ([int]$state.pid) /T /F | Out-Null; Write-Host 'AEGAEON and its active checks stopped.' }
+        return
+    }
+    if (Is-OwnedServer $state) {
+        if ($state.package -ne $PackageHash) { throw 'Stop the earlier AEGAEON instance before starting this build.' }
+        if ($state.url -notmatch '^http://127\.0\.0\.1:\d+/$') { throw 'Invalid saved local URL' }
+        if ($env:AEGAEON_NO_BROWSER -ne '1') { Start-Process $state.url }
+        Write-Output $state.url
+        return
+    }
+    $logRoot = Join-Path $InstallRoot 'logs'
+    New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
+    $stamp = [Guid]::NewGuid().ToString('N')
+    $stdout = Join-Path $logRoot ($stamp + '.out.log'); $stderr = Join-Path $logRoot ($stamp + '.err.log')
+    $arguments = @('-B','-u','-m','aegaeon_lite','serve','--demo','--port','0','--data-dir',('"' + $DataRoot + '"'))
+    if ($env:AEGAEON_NO_BROWSER -ne '1') { $arguments += '--open-browser' }
+    $serverProcess = Start-Process -FilePath $VenvPython -ArgumentList $arguments -WorkingDirectory $AppRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    for ($attempt=0; $attempt -lt 150; $attempt++) {
+        Start-Sleep -Milliseconds 200
+        if ($serverProcess.HasExited) { throw ('Server exited. Inspect ' + $stderr) }
+        $log = Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue
+        if ($log -match 'http://127\.0\.0\.1:\d+') {
+            $url = $Matches[0] + '/'
+            try { $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2; if ($response.StatusCode -ne 200) { continue } } catch { continue }
+            @{pid=$serverProcess.Id;url=$url;package=$PackageHash} | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+            Write-Output $url
+            return
+        }
+    }
+    throw ('Startup is taking longer than expected. Logs: ' + $logRoot)
+} finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
+'@
+    $variables = @{InstallRoot=$InstallRoot; AppRoot=$AppRoot; VenvPython=$VenvPython; DataRoot=$DataRoot; GitDirectory=$gitDirectory; PackageHash=$ExpectedHash}
+    $prefixText = ($variables.GetEnumerator() | ForEach-Object { '$' + $_.Key + " = '" + $_.Value.Replace("'","''") + "'" }) -join "`r`n"
+    $launchFile = Join-Path $InstallRoot 'launch.ps1'
+    [IO.File]::WriteAllText($launchFile, $prefixText + "`r`n" + $launcherText, (New-Object Text.UTF8Encoding($true)))
+    $batPrefix = "@echo off`r`nsetlocal`r`nset `"AEGAEON_LAUNCHER=%~dp0launch.ps1`"`r`n"
+    $batRun = 'powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create([IO.File]::ReadAllText($env:AEGAEON_LAUNCHER)))"' + "`r`nif errorlevel 1 pause`r`n"
+    [IO.File]::WriteAllText((Join-Path $InstallRoot 'Start AEGAEON.bat'), $batPrefix + 'set "AEGAEON_STOP="' + "`r`n" + $batRun, [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText((Join-Path $InstallRoot 'Stop AEGAEON.bat'), $batPrefix + 'set "AEGAEON_STOP=1"' + "`r`n" + $batRun, [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText((Join-Path $InstallRoot 'Open source.bat'), "@echo off`r`nexplorer.exe `"$AppRoot`"`r`n", [Text.Encoding]::Default)
+    if ($Mode -eq 'setup') { @{root=$InstallRoot;app=$AppRoot;python=$VenvPython;launcher=$launchFile;version=$AppVersion;setup=$true} | ConvertTo-Json -Compress; exit 0 }
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'AEGAEON Lite.lnk'))
+    $shortcut.TargetPath = Join-Path $InstallRoot 'Start AEGAEON.bat'; $shortcut.WorkingDirectory = $InstallRoot; $shortcut.Save()
+    Write-Host ('Source code: ' + $AppRoot)
+    Write-Host ('Start/stop/source launchers: ' + $InstallRoot)
+    & ([scriptblock]::Create([IO.File]::ReadAllText($launchFile)))
+} catch { Write-Host ('AEGAEON setup: ' + $_.Exception.Message) -ForegroundColor Red; exit 1 }

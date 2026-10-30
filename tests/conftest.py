@@ -1,45 +1,37 @@
-from __future__ import annotations
-
-from collections.abc import Iterator
-
 import pytest
-from fastapi.testclient import TestClient
 
-from aegaeon.api import create_app
-from aegaeon.config import Settings
+from aegaeon_lite.bundles import initialize
 
 
 @pytest.fixture
-def settings(tmp_path) -> Settings:
-    return Settings(
-        database_url=f"sqlite:///{tmp_path / 'aegaeon-test.db'}",
-        data_dir=tmp_path / "data",
-        worker_token="test-worker-token",
-        allow_development_worker_token=True,
-        heartbeat_timeout_seconds=5,
-        command_timeout_seconds=30,
+def project(tmp_path):
+    root = tmp_path / "canonical"
+    root.mkdir()
+    (root / "calc.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_calc.py").write_text(
+        "import unittest\nfrom calc import add\n"
+        "class Tests(unittest.TestCase):\n"
+        "    def test_add(self):\n        self.assertEqual(add(2, 3), 5)\n",
+        encoding="utf-8",
     )
+    (root / ".env").write_text("TOKEN=must-not-export")
+    initialize(root)
+    return root
 
 
 @pytest.fixture
-def client(settings: Settings) -> Iterator[TestClient]:
-    app = create_app(settings)
-    with TestClient(app) as test_client:
-        yield test_client
-
-
-@pytest.fixture
-def project_payload() -> dict[str, object]:
+def task():
     return {
-        "name": "Calculator API",
-        "prompt": (
-            "Build a Python calculator API with add, subtract, multiply and divide "
-            "endpoints and pytest tests."
-        ),
-        "strategy": "auto",
-        "intelligence": 70,
-        "maximum_retries": 2,
-        "run_tests": True,
-        "review_code": True,
-        "retry_failed_tasks": True,
+        "request": "Fix add so it adds numbers. Keep existing tests.",
+        "mode": "fix",
+        "allowed_paths": ["calc.py"],
+        "checks": [
+            {
+                "id": "regression",
+                "argv": ["python", "-m", "unittest", "discover", "-s", "tests"],
+                "cwd": ".",
+                "timeout": 10,
+            }
+        ],
     }

@@ -1,71 +1,112 @@
 from __future__ import annotations
 
-from typing import Any
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
-from pydantic import BaseModel
 
-from aegaeon.models.provider import ModelProvider, extract_json, strict_json_schema
-
-
-class TinyResult(BaseModel):
-    value: str
-    labels: list[str]
+from aegaeon_lite.provider import ModelProvider
 
 
-class QueueProvider(ModelProvider):
-    def __init__(self, outputs: list[str]) -> None:
-        self.outputs = outputs
-        self.calls = 0
+def test_native_thinking_is_forwarded_only_when_selected(monkeypatch):
+    payloads = []
 
-    @property
-    def model_id(self) -> str:
-        return "test-model"
+    def post(self, route, payload, **kwargs):
+        if route.endswith("input_tokens"):
+            return {"input_tokens": 10}
+        payloads.append(payload)
+        return {"choices": [{"message": {"content": '{}'}, "finish_reason": "stop"}]}
 
-    @property
-    def provider_name(self) -> str:
-        return "test"
-
-    def structured_formats(
-        self, schema: dict[str, Any], schema_name: str
-    ) -> list[dict[str, Any] | None]:
-        return [{"type": "json_schema", "schema": schema, "name": schema_name}]
-
-    async def complete(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        response_format: dict[str, Any] | None = None,
-        temperature: float = 0.1,
-    ) -> str:
-        self.calls += 1
-        return self.outputs.pop(0)
+    monkeypatch.setattr(ModelProvider, "_post", post)
+    ModelProvider().complete([])
+    ModelProvider(thinking=True).complete([])
+    assert payloads[0]["chat_template_kwargs"]["enable_thinking"] is False
+    assert payloads[1]["chat_template_kwargs"]["enable_thinking"] is True
 
 
-def test_strict_schema_closes_objects_and_requires_fields() -> None:
-    schema = strict_json_schema(TinyResult.model_json_schema())
-    assert schema["additionalProperties"] is False
-    assert schema["required"] == ["value", "labels"]
+@pytest.fixture
+def endpoint():
+    class Handler(BaseHTTPRequestHandler):
+        finish = "stop"
+        count = 200
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if self.path.endswith("input_tokens"):
+                data = {"input_tokens": self.count}
+            else:
+                assert payload["stream"] is False and payload["max_tokens"] == 2048
+                data = {
+                    "choices": [
+                        {
+                            "finish_reason": self.finish,
+                            "message": {
+                                "content": '{"action":"finish","summary":"Hi","unresolved":[]}'
+                            },
+                        }
+                    ]
+                }
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode())
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}/v1", Handler
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=3)
 
 
-def test_extract_json_accepts_fences_and_prefixes() -> None:
-    assert extract_json('```json\n{"value":"ok"}\n```') == '{"value":"ok"}'
-    assert extract_json('Result: {"value":"ok"}') == '{"value":"ok"}'
+def test_compatible_endpoint(endpoint):
+    url, _ = endpoint
+    value = ModelProvider(base_url=url).complete([{"role": "user", "content": "Hi"}])
+    assert json.loads(value)["action"] == "finish"
 
 
-@pytest.mark.asyncio
-async def test_structured_completion_repairs_invalid_output() -> None:
-    provider = QueueProvider(
-        [
-            '{"value": 3, "labels": []}',
-            '```json\n{"value":"corrected","labels":["safe"]}\n```',
-        ]
-    )
-    result = await provider.complete_structured(
-        [{"role": "user", "content": "Return a tiny result"}],
-        TinyResult,
-        schema_name="tiny_result",
-        retries=1,
-    )
-    assert result.value == "corrected"
-    assert provider.calls == 2
+def test_truncated_generation_is_not_executed(endpoint):
+    url, handler = endpoint
+    handler.finish = "length"
+    with pytest.raises(ValueError, match="truncated"):
+        ModelProvider(base_url=url).complete([{"role": "user", "content": "Hi"}])
+
+
+def test_exact_token_budget_enforced(endpoint):
+    url, handler = endpoint
+    handler.count = 100_000
+    with pytest.raises(ValueError, match="context budget"):
+        ModelProvider(base_url=url).complete([{"role": "user", "content": "Hi"}])
+
+
+def test_remote_endpoint_requires_explicit_opt_in():
+    with pytest.raises(ValueError, match="permit-remote"):
+        ModelProvider(base_url="https://example.com/v1")
+    with pytest.raises(ValueError, match="HTTPS"):
+        ModelProvider(base_url="http://example.com/v1", permit_remote=True)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        None,
+        {},
+        "http://localhost:wrong/v1",
+        "http://localhost:0/v1",
+        "http://localhost:65536/v1",
+        "http://localhost:8080/v1?key=value",
+    ],
+)
+def test_malformed_endpoint_is_rejected_before_network(endpoint):
+    with pytest.raises(ValueError):
+        ModelProvider(base_url=endpoint)
+
+
+@pytest.mark.parametrize("alias", [{}, [], None, "", "   ", "x" * 201])
+def test_model_alias_must_be_bounded_text(alias):
+    with pytest.raises(ValueError, match="alias"):
+        ModelProvider(model=alias)

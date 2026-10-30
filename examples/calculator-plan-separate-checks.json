@@ -1,0 +1,91 @@
+{
+  "goal": "Fix and document the calculator addition example.",
+  "requirements": [
+    {
+      "id": "R1",
+      "text": "Addition passes the existing regression tests."
+    },
+    {
+      "id": "R2",
+      "text": "README explains the add function with an example."
+    }
+  ],
+  "steps": [
+    {
+      "id": "S1",
+      "title": "Repair addition",
+      "depends_on": [],
+      "requirements": [
+        "R1"
+      ],
+      "acceptance": "Inspect the operator and both regression cases.",
+      "task": {
+        "request": "Fix add in calc.py so it adds numbers correctly. Preserve the existing regression tests.",
+        "mode": "fix",
+        "allowed_paths": [
+          "calc.py"
+        ],
+        "checks": [
+          {
+            "id": "regression",
+            "argv": [
+              "python",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tests"
+            ],
+            "timeout": 60
+          }
+        ]
+      },
+      "acceptance_checks": [
+        {
+          "id": "pc-regression",
+          "argv": [
+            "python",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests"
+          ],
+          "timeout": 60
+        }
+      ]
+    },
+    {
+      "id": "S2",
+      "title": "Document the corrected function",
+      "depends_on": [
+        "S1"
+      ],
+      "requirements": [
+        "R2"
+      ],
+      "acceptance": "README shows add(2, 3) == 5; tests still pass.",
+      "task": {
+        "request": "Document the corrected add function in README.md. Preserve the implementation and tests.",
+        "mode": "fix",
+        "allowed_paths": [
+          "README.md"
+        ],
+        "checks": [
+          {
+            "id": "regression",
+            "argv": [
+              "python",
+              "-m",
+              "unittest",
+              "discover",
+              "-s",
+              "tests"
+            ],
+            "timeout": 60
+          }
+        ]
+      }
+    }
+  ]
+}

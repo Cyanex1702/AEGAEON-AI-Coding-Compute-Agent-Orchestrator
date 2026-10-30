@@ -1,39 +1,26 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "aegaeon"
-version = "0.3.0"
-description = "Local-first distributed AI coding and compute orchestration"
-readme = "README.md"
+name = "aegaeon-lite"
+version = "2.0.0"
+description = "A small notebook-first coding assistant with bounded tools and verified transfers"
 requires-python = ">=3.11"
-dependencies = [
-  "fastapi>=0.115,<1",
-  "uvicorn[standard]>=0.34,<1",
-  "sqlalchemy>=2.0,<3",
-  "pydantic>=2.10,<3",
-  "pydantic-settings>=2.7,<3",
-  "httpx>=0.28,<1",
-  "websockets>=14,<16",
-  "psutil>=6,<8",
-  "keyring>=25,<26",
-  "python-multipart>=0.0.20,<1",
-]
+dependencies = []
+license = {file = "LICENSE"}
 
-[project.optional-dependencies]
-dev = [
-  "pytest>=8.3,<9",
-  "pytest-asyncio>=0.25,<1",
-  "ruff>=0.9,<1",
-]
+[project.scripts]
+aegaeon-lite = "aegaeon_lite.cli:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["aegaeon", "worker"]
+[tool.setuptools.packages.find]
+include = ["aegaeon_lite*"]
+
+[tool.setuptools.package-data]
+aegaeon_lite = ["web/*.html", "web/*.css", "web/*.js", "model_catalog.json", "web/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
@@ -41,4 +28,3 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-

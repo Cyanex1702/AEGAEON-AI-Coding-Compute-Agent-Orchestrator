@@ -1,0 +1,3 @@
+[
+  {"id": "python-tests", "argv": ["python", "-m", "unittest", "discover", "-s", "tests"], "cwd": ".", "timeout": 60}
+]

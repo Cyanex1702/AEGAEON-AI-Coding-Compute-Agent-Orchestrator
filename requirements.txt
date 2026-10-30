@@ -1,0 +1,3 @@
+# No third-party Python runtime packages required.
+# Prerequisites: Python 3.11+ and Git.
+# Model and project dependencies are configured separately.
